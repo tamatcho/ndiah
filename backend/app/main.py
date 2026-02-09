@@ -1,9 +1,17 @@
+import os
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from .db import Base, engine
 from .config import settings
 from .routes import documents, chat, timeline
 
+def ensure_storage_paths() -> None:
+    for path in (settings.STORAGE_DIR, settings.UPLOAD_DIR, settings.FAISS_DIR):
+        os.makedirs(path, exist_ok=True)
+
+
+ensure_storage_paths()
 Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="Property AI MVP")

@@ -13,6 +13,9 @@ class Settings:
     STORAGE_DIR: str = os.getenv("STORAGE_DIR", str(BASE_DIR / "storage"))
     UPLOAD_DIR: str = os.getenv("UPLOAD_DIR", str(BASE_DIR / "storage" / "uploads"))
     FAISS_DIR: str = os.getenv("FAISS_DIR", str(BASE_DIR / "storage" / "faiss"))
-    DB_URL: str = os.getenv("DB_URL", "sqlite:///./storage/app.db")
+    DB_URL: str = os.getenv(
+        "DB_URL",
+        f"sqlite:///{(BASE_DIR / 'storage' / 'app.db').as_posix()}",
+    )
 
 settings = Settings()
