@@ -1,6 +1,6 @@
 import type { RefObject } from "react";
 import StatusBanner from "../StatusBanner";
-import { ChatMessage, Source, UiState } from "../../types";
+import { ChatMessage, DocumentItem, Source, UiState } from "../../types";
 
 type Props = {
   state: UiState;
@@ -10,6 +10,7 @@ type Props = {
   chatQuestion: string;
   chatPending: boolean;
   exampleQuestions: string[];
+  documentsById: Record<number, DocumentItem>;
   onQuestionChange: (value: string) => void;
   onAsk: () => void;
   onUseExample: (q: string) => void;
@@ -18,6 +19,13 @@ type Props = {
 };
 
 export default function ChatCard(props: Props) {
+  const formatDocumentDate = (value?: string | null) => {
+    if (!value) return "unbekannt";
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return "unbekannt";
+    return date.toLocaleDateString("de-DE");
+  };
+
   return (
     <section id="chatCard" className="card reveal" data-state={props.state}>
       <h2>Chat über Dokumente</h2>
@@ -46,10 +54,19 @@ export default function ChatCard(props: Props) {
                   <ul className="sources-list">
                     {msg.sources.map((s) => {
                       const key = `${s.document_id}:${s.chunk_id}`;
+                      const doc = props.documentsById[s.document_id];
+                      const sourceLabel = doc?.filename || `Dokument ${s.document_id}`;
                       return (
                         <li className="source-row" key={`${msg.id}-${key}`}>
                           <div>
-                            document_id: {s.document_id}, chunk_id: {s.chunk_id}, score: {typeof s.score === "number" ? s.score.toFixed(3) : "-"}
+                            Quelle: {sourceLabel}
+                          </div>
+                          <div>
+                            Stand: Dokument vom {formatDocumentDate(doc?.uploaded_at)}
+                          </div>
+                          <div>
+                            document_id: {s.document_id}, chunk_id: {s.chunk_id}, score:{" "}
+                            {typeof s.score === "number" ? s.score.toFixed(3) : "-"}
                           </div>
                           <button className="source-btn" onClick={() => props.onLoadSnippet(msg.id, s)}>
                             Snippet laden

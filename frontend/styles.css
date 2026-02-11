@@ -489,7 +489,8 @@ select:focus-visible {
   border: 1px solid #d8dfeb;
   border-radius: 12px;
   background: rgba(255, 255, 255, 0.92);
-  overflow: hidden;
+  overflow: auto;
+  max-height: 360px;
 }
 
 .docs-list-empty {
@@ -551,6 +552,26 @@ select:focus-visible {
   gap: 10px;
 }
 
+.timeline-carousel {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.timeline-counter {
+  color: var(--muted);
+  font-size: 0.84rem;
+  font-weight: 700;
+}
+
+.timeline-nav {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
 .timeline-empty {
   color: var(--muted);
   font-size: 0.9rem;
@@ -573,6 +594,23 @@ select:focus-visible {
   color: #12456e;
   background: #edf5ff;
   border-bottom: 1px solid #d8dfeb;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.timeline-group-animated {
+  animation: timeline-swap 280ms ease both;
+}
+
+.timeline-rotate-badge {
+  font-size: 0.75rem;
+  color: #0f5c95;
+  background: #dceeff;
+  border: 1px solid #bad7f6;
+  border-radius: 999px;
+  padding: 1px 8px;
 }
 
 .timeline-cards {
@@ -794,6 +832,24 @@ select:focus-visible {
   to {
     opacity: 1;
     transform: translateY(0);
+  }
+}
+
+@keyframes timeline-swap {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .timeline-group-animated,
+  .reveal {
+    animation: none !important;
   }
 }
 

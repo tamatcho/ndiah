@@ -8,6 +8,7 @@ from ..models import Document
 from ..config import settings
 from ..pdf_ingest import extract_text_from_pdf, simple_chunk
 from ..rag import upsert_chunks
+from ..timeline_service import extract_and_store_timeline_for_document
 
 router = APIRouter(prefix="/documents", tags=["documents"])
 
@@ -146,9 +147,20 @@ async def upload_pdf(file: UploadFile = File(...), db: Session = Depends(get_db)
     except Exception:
         raise HTTPException(status_code=500, detail="Vector indexing failed")
 
+    try:
+        timeline_items = extract_and_store_timeline_for_document(db, doc, raw_text=text)
+        db.commit()
+    except RuntimeError as e:
+        db.rollback()
+        raise HTTPException(status_code=502, detail=str(e))
+    except Exception:
+        db.rollback()
+        raise HTTPException(status_code=500, detail="Timeline extraction failed")
+
     return {
         "document_id": doc.id,
         "filename": safe_filename,
         "uploaded_at": doc.uploaded_at.isoformat() if doc.uploaded_at else None,
         "chunks_indexed": len(payload),
+        "timeline_items_stored": len(timeline_items),
     }

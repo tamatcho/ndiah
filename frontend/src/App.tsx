@@ -379,6 +379,48 @@ export default function App() {
     }
   };
 
+  const extractTimelineFromDocuments = async () => {
+    if (documents.length === 0) {
+      setTimelineState("error");
+      setTimelineMessage("Keine Dokumente");
+      setTimelineDetails("Bitte zuerst mindestens ein PDF hochladen.");
+      addToast("error", "Timeline fehlgeschlagen", "Keine hochgeladenen Dokumente gefunden.");
+      return;
+    }
+
+    setTimelineState("loading");
+    setTimelineMessage("Extrahiere aus allen Dokumenten...");
+    setTimelineDetails(`${documents.length} Dokument(e) ausgewählt.`);
+    try {
+      const data = await fetchJson<{
+        items: TimelineItem[];
+        documents_considered: number;
+        documents_processed: number;
+        documents_failed: Array<{ document_id: number; filename: string; reason: string }>;
+      }>(`${apiBase}/timeline/extract-documents`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({})
+      });
+
+      const items = Array.isArray(data.items) ? data.items : [];
+      const failed = Array.isArray(data.documents_failed) ? data.documents_failed.length : 0;
+      setTimelineItems(items);
+      setTimelineState("success");
+      setTimelineMessage("Timeline aus Dokumenten extrahiert");
+      setTimelineDetails(
+        `${items.length} Einträge, ${data.documents_processed || 0}/${data.documents_considered || documents.length} Dokumente verarbeitet, ${failed} fehlgeschlagen.`
+      );
+      addToast("success", "Timeline extrahiert", `${items.length} Einträge aus Dokumenten`);
+    } catch (e) {
+      const message = e instanceof Error ? e.message : "Unbekannter Fehler";
+      setTimelineState("error");
+      setTimelineMessage("Extraktion aus Dokumenten fehlgeschlagen");
+      setTimelineDetails(message);
+      addToast("error", "Timeline fehlgeschlagen", message);
+    }
+  };
+
   const filteredTimeline = useMemo(() => {
     const sorted = [...timelineItems].sort((a, b) => {
       const da = new Date(a.date_iso).getTime();
@@ -410,6 +452,14 @@ export default function App() {
     }
     return Array.from(map.entries());
   }, [filteredTimeline]);
+
+  const documentsById = useMemo(
+    () =>
+      Object.fromEntries(
+        documents.map((doc) => [doc.document_id, doc] as const)
+      ) as Record<number, DocumentItem>,
+    [documents]
+  );
 
   return (
     <>
@@ -477,6 +527,7 @@ export default function App() {
           chatQuestion={chatQuestion}
           chatPending={chatPending}
           exampleQuestions={EXAMPLE_QUESTIONS}
+          documentsById={documentsById}
           onQuestionChange={setChatQuestion}
           onAsk={() => void askChat(chatQuestion)}
           onUseExample={setChatQuestion}
@@ -488,6 +539,7 @@ export default function App() {
           state={timelineState}
           message={timelineMessage}
           details={timelineDetails}
+          hasDocuments={documents.length > 0}
           timelineItems={timelineItems}
           timelineInput={timelineInput}
           timelineSearch={timelineSearch}
@@ -496,6 +548,7 @@ export default function App() {
           timelineGrouped={timelineGrouped}
           onInputChange={setTimelineInput}
           onExtract={() => void extractTimeline()}
+          onExtractDocuments={() => void extractTimelineFromDocuments()}
           onSearchChange={setTimelineSearch}
           onCategoryChange={setTimelineCategory}
           normalizeCategory={normalizeCategory}
