@@ -4,12 +4,21 @@ import ChatCard from "./components/cards/ChatCard";
 import TimelineCard from "./components/cards/TimelineCard";
 import UploadCard from "./components/cards/UploadCard";
 import ToastContainer from "./components/ToastContainer";
-import { ApiError, apiFetch, normalizeApiError, uploadWithProgress } from "./lib/api";
+import { ApiError, apiFetch, normalizeApiError, setApiAuthToken, uploadWithProgress } from "./lib/api";
+import { auth } from "./lib/firebase";
+import {
+  createUserWithEmailAndPassword,
+  onIdTokenChanged,
+  signInWithEmailAndPassword,
+  signOut,
+  type User
+} from "firebase/auth";
 import { AuthUser, ChatMessage, DocumentItem, DocumentStatus, PropertyItem, Source, TimelineItem, Toast, UiState } from "./types";
 
 const BASE_KEY = "ndiah_base_url";
 const CHAT_HISTORY_KEY_PREFIX = "ndiah_chat_history";
 const ACTIVE_PROPERTY_KEY = "ndiah_active_property_id";
+const AUTH_TOKEN_KEY = "ndiah_firebase_id_token";
 const DEFAULT_API_BASE = (import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8000").replace(/\/+$/, "");
 const MAX_FILE_SIZE = 20 * 1024 * 1024;
 const EXAMPLE_QUESTIONS = [
@@ -46,8 +55,9 @@ export default function App() {
   const [showColdStartBanner, setShowColdStartBanner] = useState(false);
   const [currentUser, setCurrentUser] = useState<AuthUser | null>(null);
   const [authEmail, setAuthEmail] = useState("");
+  const [authPassword, setAuthPassword] = useState("");
   const [authPending, setAuthPending] = useState(false);
-  const [magicLink, setMagicLink] = useState("");
+  const [firebaseIdToken, setFirebaseIdToken] = useState(() => localStorage.getItem(AUTH_TOKEN_KEY) || "");
   const [properties, setProperties] = useState<PropertyItem[]>([]);
   const [newPropertyName, setNewPropertyName] = useState("");
   const [propertiesPending, setPropertiesPending] = useState(false);
@@ -97,6 +107,28 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem(BASE_KEY, apiBase);
   }, [apiBase]);
+
+  useEffect(() => {
+    if (firebaseIdToken) {
+      localStorage.setItem(AUTH_TOKEN_KEY, firebaseIdToken);
+      setApiAuthToken(firebaseIdToken);
+      return;
+    }
+    localStorage.removeItem(AUTH_TOKEN_KEY);
+    setApiAuthToken(null);
+  }, [firebaseIdToken]);
+
+  useEffect(() => {
+    const unsubscribe = onIdTokenChanged(auth, async (user: User | null) => {
+      if (!user) {
+        setFirebaseIdToken("");
+        return;
+      }
+      const token = await user.getIdToken();
+      setFirebaseIdToken(token);
+    });
+    return unsubscribe;
+  }, []);
 
   useEffect(() => {
     if (activePropertyId == null) {
@@ -166,43 +198,59 @@ export default function App() {
     }
   };
 
-  const requestMagicLink = async () => {
+  const loginWithEmailPassword = async () => {
     const email = authEmail.trim();
     if (!email) {
       addToast("error", "E-Mail fehlt", "Bitte E-Mail eingeben.");
       return;
     }
-    setAuthPending(true);
-    setMagicLink("");
-    try {
-      const { data } = await apiFetch<{ magic_link?: string }>(`${apiBase}/auth/request-link`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email })
-      });
-      if (data.magic_link) {
-        setMagicLink(data.magic_link);
-      }
-      addToast("success", "Login-Link angefordert", data.magic_link ? "DEV-Link verfügbar." : "Prüfe dein E-Mail-Postfach.");
-    } catch (e) {
-      addToast("error", "Login-Link fehlgeschlagen", normalizeApiError(e));
-    } finally {
-      setAuthPending(false);
+    if (!authPassword) {
+      addToast("error", "Passwort fehlt", "Bitte Passwort eingeben.");
+      return;
     }
-  };
 
-  const verifyMagicLink = async () => {
-    if (!magicLink) return;
     setAuthPending(true);
     try {
-      await apiFetch<{ user: AuthUser }>(`${apiBase}${magicLink}`);
+      const creds = await signInWithEmailAndPassword(auth, email, authPassword);
+      const token = await creds.user.getIdToken();
+      setFirebaseIdToken(token);
+
       const me = await loadMe();
       if (me) {
         addToast("success", "Eingeloggt", me.email);
         await loadProperties();
       }
     } catch (e) {
-      addToast("error", "Verifizierung fehlgeschlagen", normalizeApiError(e));
+      addToast("error", "Anmeldung fehlgeschlagen", normalizeApiError(e));
+    } finally {
+      setAuthPending(false);
+    }
+  };
+
+  const registerWithEmailPassword = async () => {
+    const email = authEmail.trim();
+    if (!email) {
+      addToast("error", "E-Mail fehlt", "Bitte E-Mail eingeben.");
+      return;
+    }
+    if (!authPassword) {
+      addToast("error", "Passwort fehlt", "Bitte Passwort eingeben.");
+      return;
+    }
+
+    setAuthPending(true);
+    try {
+      const creds = await createUserWithEmailAndPassword(auth, email, authPassword);
+      const token = await creds.user.getIdToken();
+      setFirebaseIdToken(token);
+
+      const me = await loadMe();
+      if (me) {
+        addToast("success", "Registrierung erfolgreich", me.email);
+        await loadProperties();
+      }
+    } catch (e) {
+      addToast("error", "Registrierung fehlgeschlagen", normalizeApiError(e));
     } finally {
       setAuthPending(false);
     }
@@ -211,7 +259,8 @@ export default function App() {
   const logout = async () => {
     setAuthPending(true);
     try {
-      await apiFetch<{ ok: boolean }>(`${apiBase}/auth/logout`, { method: "POST" });
+      await signOut(auth);
+      setFirebaseIdToken("");
     } finally {
       setCurrentUser(null);
       setProperties([]);
@@ -991,26 +1040,30 @@ export default function App() {
               <div className="col">
                 <div className="row wrap">
                   <input
-                    placeholder="E-Mail für Magic Link"
+                    placeholder="E-Mail"
                     value={authEmail}
                     onChange={(e) => setAuthEmail(e.target.value)}
                     disabled={authPending}
                   />
-                  <button className="btn" onClick={() => void requestMagicLink()} disabled={authPending}>
-                    Link anfordern
+                  <input
+                    type="password"
+                    placeholder="Passwort"
+                    value={authPassword}
+                    onChange={(e) => setAuthPassword(e.target.value)}
+                    disabled={authPending}
+                  />
+                </div>
+                <div className="row wrap">
+                  <button className="btn" onClick={() => void loginWithEmailPassword()} disabled={authPending}>
+                    Anmelden
+                  </button>
+                  <button className="chip" onClick={() => void registerWithEmailPassword()} disabled={authPending}>
+                    Registrieren
                   </button>
                 </div>
                 <div className="timeline-hint">
                   Nach dem Login kannst du eine Immobilie anlegen und Dokumente hochladen.
                 </div>
-                {magicLink ? (
-                  <div className="row wrap">
-                    <code>{magicLink}</code>
-                    <button className="chip" onClick={() => void verifyMagicLink()} disabled={authPending}>
-                      DEV Link verifizieren
-                    </button>
-                  </div>
-                ) : null}
               </div>
             </header>
           </section>

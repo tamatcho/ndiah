@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from ..auth import get_current_user
+from ..firebase_auth import get_current_user
 from ..db import get_db
 from ..models import Property, User
 from ..property_access import get_owned_property_or_404

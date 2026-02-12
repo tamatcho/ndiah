@@ -5,7 +5,7 @@ import zipfile
 from fastapi import APIRouter, UploadFile, File, Depends, HTTPException, Form, BackgroundTasks
 from sqlalchemy.orm import Session
 
-from ..auth import get_current_user
+from ..firebase_auth import get_current_user
 from ..config import settings
 from ..db import get_db, SessionLocal
 from ..models import Chunk, Document, Property, TimelineItem, User

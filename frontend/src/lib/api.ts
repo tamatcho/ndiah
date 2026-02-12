@@ -12,6 +12,12 @@ export class ApiError extends Error {
   }
 }
 
+let authToken: string | null = null;
+
+export function setApiAuthToken(token: string | null) {
+  authToken = token;
+}
+
 type ApiFetchOptions = RequestInit & {
   timeoutMs?: number;
 };
@@ -60,10 +66,15 @@ export async function apiFetch<T>(url: string, options: ApiFetchOptions = {}): P
   const controller = new AbortController();
   const timer = window.setTimeout(() => controller.abort(), timeoutMs);
   const startedAt = performance.now();
+  const headers = new Headers(requestOptions.headers || undefined);
+  if (authToken && !headers.has("Authorization")) {
+    headers.set("Authorization", `Bearer ${authToken}`);
+  }
 
   try {
     const resp = await fetch(url, {
       ...requestOptions,
+      headers,
       credentials: requestOptions.credentials ?? "include",
       signal: requestOptions.signal || controller.signal
     });
@@ -115,6 +126,9 @@ export function uploadWithProgress(
     xhr.open("POST", `${baseUrl}/documents/upload`);
     xhr.withCredentials = true;
     xhr.timeout = 180000;
+    if (authToken) {
+      xhr.setRequestHeader("Authorization", `Bearer ${authToken}`);
+    }
 
     xhr.upload.onprogress = (event) => {
       if (!event.lengthComputable) return;
