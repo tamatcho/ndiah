@@ -53,6 +53,16 @@ function normalizeFirebaseAuthError(error: unknown) {
   switch (error.code) {
     case "auth/email-already-in-use":
       return "Diese E-Mail ist bereits registriert. Bitte anmelden.";
+    case "auth/invalid-credential":
+      return "E-Mail oder Passwort ist falsch.";
+    case "auth/wrong-password":
+      return "Falsches Passwort.";
+    case "auth/user-not-found":
+      return "Kein Konto zu dieser E-Mail gefunden.";
+    case "auth/user-disabled":
+      return "Dieses Konto wurde deaktiviert.";
+    case "auth/too-many-requests":
+      return "Zu viele Versuche. Bitte später erneut versuchen.";
     case "auth/invalid-email":
       return "Ungültige E-Mail-Adresse.";
     case "auth/weak-password":
