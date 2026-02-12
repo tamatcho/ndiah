@@ -1,20 +1,26 @@
 import os
 import re
-import json
 import io
 import zipfile
-from fastapi import APIRouter, UploadFile, File, Depends, HTTPException
+from fastapi import APIRouter, UploadFile, File, Depends, HTTPException, Form, BackgroundTasks
 from sqlalchemy.orm import Session
-from ..db import get_db
-from ..models import Document
+
+from ..auth import get_current_user
 from ..config import settings
-from ..pdf_ingest import extract_text_from_pdf, simple_chunk
+from ..db import get_db, SessionLocal
+from ..models import Chunk, Document, Property, TimelineItem, User
+from ..pdf_ingest import extract_text_from_pdf_bytes, simple_chunk
+from ..property_access import get_owned_property_or_404
 from ..rag import upsert_chunks
 from ..timeline_service import extract_and_store_timeline_for_document
 
-router = APIRouter(prefix="/documents", tags=["documents"])
+router = APIRouter(prefix="/documents", tags=["documents"], dependencies=[Depends(get_current_user)])
 MAX_ZIP_PDF_FILES = 100
 MAX_ZIP_TOTAL_PDF_BYTES = 200 * 1024 * 1024
+
+
+PDF_CONTENT_TYPES = {"application/pdf"}
+ZIP_CONTENT_TYPES = {"application/zip", "application/x-zip-compressed"}
 
 
 def _sanitize_filename(filename: str) -> str:
@@ -25,76 +31,79 @@ def _sanitize_filename(filename: str) -> str:
     return safe
 
 
-def _count_uploaded_pdfs(upload_dir: str) -> int:
-    if not os.path.isdir(upload_dir):
-        return 0
-    return sum(
-        1
-        for name in os.listdir(upload_dir)
-        if os.path.isfile(os.path.join(upload_dir, name)) and name.lower().endswith(".pdf")
-    )
+def _is_pdf_upload(filename: str, content_type: str | None) -> bool:
+    name = (filename or "").lower()
+    ctype = (content_type or "").lower()
+    return name.endswith(".pdf") or ctype in PDF_CONTENT_TYPES
 
 
-def _load_faiss_meta_entries() -> list[dict]:
-    meta_path = os.path.join(settings.FAISS_DIR, "meta.json")
-    if not os.path.exists(meta_path):
-        return []
-    try:
-        with open(meta_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except Exception:
-        return []
-    return data if isinstance(data, list) else []
+def _is_zip_upload(filename: str, content_type: str | None) -> bool:
+    name = (filename or "").lower()
+    ctype = (content_type or "").lower()
+    return name.endswith(".zip") or ctype in ZIP_CONTENT_TYPES
 
 
-def _resolve_unique_upload_name(filename: str) -> tuple[str, str]:
-    base, ext = os.path.splitext(filename)
-    candidate = filename
-    counter = 1
-    while os.path.exists(os.path.join(settings.UPLOAD_DIR, candidate)):
-        counter += 1
-        candidate = f"{base}_{counter}{ext}"
-    return candidate, os.path.join(settings.UPLOAD_DIR, candidate)
+def _ensure_property_document_limit_not_exceeded(db: Session, property_id: int, incoming_docs: int = 1) -> None:
+    docs_count_for_property = db.query(Document).filter(Document.property_id == property_id).count()
+    if docs_count_for_property + incoming_docs > settings.FREE_TIER_MAX_DOCUMENTS_PER_PROPERTY:
+        raise HTTPException(
+            status_code=429,
+            detail=(
+                "Limit erreicht: Maximal "
+                f"{settings.FREE_TIER_MAX_DOCUMENTS_PER_PROPERTY} Dokumente pro Immobilie im Free-Tarif."
+            ),
+        )
 
 
-def _ingest_pdf_content(db: Session, filename: str, content: bytes) -> dict:
+def _ingest_pdf_content(db: Session, property_obj: Property, filename: str, content: bytes) -> dict:
+    _ensure_property_document_limit_not_exceeded(db, property_obj.id, incoming_docs=1)
+
     safe_filename = _sanitize_filename(filename)
     if not safe_filename.lower().endswith(".pdf"):
-        raise HTTPException(status_code=400, detail="Only PDF files are supported")
+        raise HTTPException(status_code=400, detail="Nur PDF-Dateien sind erlaubt.")
     if not content.startswith(b"%PDF"):
-        raise HTTPException(status_code=400, detail="Uploaded file is not a valid PDF")
+        raise HTTPException(status_code=400, detail="Die hochgeladene Datei ist kein gültiges PDF.")
+    if len(content) > settings.MAX_PDF_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Datei zu groß: Maximal {settings.MAX_PDF_BYTES // (1024 * 1024)} MB pro PDF.",
+        )
 
-    os.makedirs(settings.UPLOAD_DIR, exist_ok=True)
-    final_filename, save_path = _resolve_unique_upload_name(safe_filename)
-    with open(save_path, "wb") as f:
-        f.write(content)
-
-    doc = Document(filename=final_filename, path=save_path)
+    doc = Document(
+        property_id=property_obj.id,
+        filename=safe_filename,
+        path=None,
+        file_bytes=content,
+        content_type="application/pdf",
+    )
     try:
         db.add(doc)
         db.commit()
         db.refresh(doc)
     except Exception:
         db.rollback()
-        raise HTTPException(status_code=500, detail="Could not persist document metadata")
-
-    text = extract_text_from_pdf(save_path)
-    chunks = simple_chunk(text)
-
-    payload = []
-    for i, ch in enumerate(chunks):
-        payload.append({
-            "document_id": doc.id,
-            "chunk_id": f"{doc.id}-{i}",
-            "text": ch
-        })
+        raise HTTPException(status_code=500, detail="Dokumentmetadaten konnten nicht gespeichert werden.")
 
     try:
-        upsert_chunks(payload, settings.FAISS_DIR)
+        text = extract_text_from_pdf_bytes(content)
+    except Exception:
+        raise HTTPException(status_code=400, detail="PDF konnte nicht gelesen werden.")
+    doc.extracted_text = text
+
+    chunks = simple_chunk(text)
+    payload = [
+        {"document_id": doc.id, "chunk_id": f"{doc.id}-{i}", "text": ch}
+        for i, ch in enumerate(chunks)
+    ]
+
+    try:
+        upsert_chunks(db, payload)
     except RuntimeError as e:
+        db.rollback()
         raise HTTPException(status_code=502, detail=str(e))
     except Exception:
-        raise HTTPException(status_code=500, detail="Vector indexing failed")
+        db.rollback()
+        raise HTTPException(status_code=500, detail="Indexierung der Dokumentinhalte fehlgeschlagen.")
 
     try:
         timeline_items = extract_and_store_timeline_for_document(db, doc, raw_text=text)
@@ -104,43 +113,89 @@ def _ingest_pdf_content(db: Session, filename: str, content: bytes) -> dict:
         raise HTTPException(status_code=502, detail=str(e))
     except Exception:
         db.rollback()
-        raise HTTPException(status_code=500, detail="Timeline extraction failed")
+        raise HTTPException(status_code=500, detail="Timeline-Extraktion fehlgeschlagen.")
 
     return {
         "document_id": doc.id,
-        "filename": final_filename,
+        "property_id": doc.property_id,
+        "filename": doc.filename,
         "uploaded_at": doc.uploaded_at.isoformat() if doc.uploaded_at else None,
         "chunks_indexed": len(payload),
-        "timeline_items_stored": len(timeline_items),
+        "timeline_items_upserted": len(timeline_items),
     }
 
 
+def _process_zip_in_background(property_id: int, zip_content: bytes) -> None:
+    db = SessionLocal()
+    try:
+        property_obj = db.query(Property).filter(Property.id == property_id).first()
+        if not property_obj:
+            return
+        with zipfile.ZipFile(io.BytesIO(zip_content), "r") as archive:
+            entries = [entry for entry in archive.infolist() if not entry.is_dir()]
+            pdf_entries = [entry for entry in entries if entry.filename.lower().endswith(".pdf")]
+            for entry in pdf_entries:
+                try:
+                    inner_name = _sanitize_filename(entry.filename)
+                    inner_content = archive.read(entry)
+                    if len(inner_content) > settings.MAX_PDF_BYTES:
+                        continue
+                    if not inner_content.startswith(b"%PDF"):
+                        continue
+                    _ingest_pdf_content(db, property_obj, inner_name, inner_content)
+                except Exception:
+                    db.rollback()
+                    continue
+    finally:
+        db.close()
+
+
 @router.get("/status")
-def documents_status(db: Session = Depends(get_db)):
-    docs_count = db.query(Document).count()
-    upload_pdf_count = _count_uploaded_pdfs(settings.UPLOAD_DIR)
-    meta = _load_faiss_meta_entries()
-    indexed_doc_ids = {item.get("document_id") for item in meta if item.get("document_id") is not None}
-    index_exists = os.path.exists(os.path.join(settings.FAISS_DIR, "index.faiss"))
+def documents_status(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    docs_count = (
+        db.query(Document)
+        .join(Property, Document.property_id == Property.id)
+        .filter(Property.user_id == current_user.id)
+        .count()
+    )
+    chunk_count = (
+        db.query(Chunk)
+        .join(Document, Chunk.document_id == Document.id)
+        .join(Property, Document.property_id == Property.id)
+        .filter(Property.user_id == current_user.id)
+        .count()
+    )
     return {
         "documents_in_db": docs_count,
-        "pdf_files_in_upload_dir": upload_pdf_count,
-        "faiss_index_exists": index_exists,
-        "faiss_meta_entries": len(meta),
-        "faiss_indexed_documents": len(indexed_doc_ids),
-        "upload_dir": settings.UPLOAD_DIR,
-        "faiss_dir": settings.FAISS_DIR,
+        "chunks_in_db": chunk_count,
     }
 
 
 @router.get("")
-def list_documents(db: Session = Depends(get_db)):
-    docs = db.query(Document).order_by(Document.uploaded_at.desc()).all()
+def list_documents(
+    property_id: int | None = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    if property_id is not None:
+        get_owned_property_or_404(db, current_user.id, property_id)
+
+    query = (
+        db.query(Document)
+        .join(Property, Document.property_id == Property.id)
+        .filter(Property.user_id == current_user.id)
+    )
+    if property_id is not None:
+        query = query.filter(Document.property_id == property_id)
+    docs = query.order_by(Document.uploaded_at.desc()).all()
     return [
         {
             "document_id": d.id,
+            "property_id": d.property_id,
             "filename": d.filename,
-            "path": d.path,
             "uploaded_at": d.uploaded_at.isoformat() if d.uploaded_at else None,
         }
         for d in docs
@@ -153,89 +208,133 @@ def get_source_snippet(
     chunk_id: str,
     max_chars: int = 1200,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
-    meta = _load_faiss_meta_entries()
-    hit = None
-    for item in meta:
-        if item.get("document_id") == document_id and item.get("chunk_id") == chunk_id:
-            hit = item
-            break
+    doc = (
+        db.query(Document)
+        .join(Property, Document.property_id == Property.id)
+        .filter(Document.id == document_id, Property.user_id == current_user.id)
+        .first()
+    )
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
 
-    if hit is None:
+    chunk = db.query(Chunk).filter(Chunk.document_id == document_id, Chunk.chunk_id == chunk_id).first()
+    if not chunk:
         raise HTTPException(status_code=404, detail="Source chunk not found")
 
-    text = hit.get("text") or ""
     safe_max_chars = max(1, min(max_chars, 5000))
-    doc = db.query(Document).filter(Document.id == document_id).first()
+    text = chunk.text or ""
     return {
         "document_id": document_id,
+        "property_id": doc.property_id,
         "chunk_id": chunk_id,
-        "filename": doc.filename if doc else None,
+        "filename": doc.filename,
         "snippet": text[:safe_max_chars],
         "total_chars": len(text),
     }
 
 
 @router.post("/upload")
-async def upload_pdf(file: UploadFile = File(...), db: Session = Depends(get_db)):
+async def upload_pdf(
+    property_id: int = Form(...),
+    file: UploadFile = File(...),
+    background_tasks: BackgroundTasks = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    property_obj = get_owned_property_or_404(db, current_user.id, property_id)
     safe_filename = _sanitize_filename(file.filename)
     content = await file.read()
+    content_type = getattr(file, "content_type", None)
+
+    if not (_is_pdf_upload(safe_filename, content_type) or _is_zip_upload(safe_filename, content_type)):
+        raise HTTPException(status_code=400, detail="Nur PDF- oder ZIP-Dateien sind erlaubt.")
+
+    if _is_pdf_upload(safe_filename, content_type) and not safe_filename.lower().endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="Bitte lade eine PDF-Datei mit der Endung .pdf hoch.")
+
+    if _is_zip_upload(safe_filename, content_type) and not safe_filename.lower().endswith(".zip"):
+        raise HTTPException(status_code=400, detail="Bitte lade eine ZIP-Datei mit der Endung .zip hoch.")
+
+    if safe_filename.lower().endswith(".pdf") and len(content) > settings.MAX_PDF_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Datei zu groß: Maximal {settings.MAX_PDF_BYTES // (1024 * 1024)} MB pro PDF.",
+        )
 
     if safe_filename.lower().endswith(".pdf"):
-        return _ingest_pdf_content(db, safe_filename, content)
-
-    if not safe_filename.lower().endswith(".zip"):
-        raise HTTPException(status_code=400, detail="Only PDF or ZIP files are supported")
+        _ensure_property_document_limit_not_exceeded(db, property_obj.id, incoming_docs=1)
+        return _ingest_pdf_content(db, property_obj, safe_filename, content)
 
     if not zipfile.is_zipfile(io.BytesIO(content)):
-        raise HTTPException(status_code=400, detail="Uploaded ZIP file is invalid")
+        raise HTTPException(status_code=400, detail="Die hochgeladene ZIP-Datei ist ungültig.")
 
     with zipfile.ZipFile(io.BytesIO(content), "r") as archive:
         entries = [entry for entry in archive.infolist() if not entry.is_dir()]
         pdf_entries = [entry for entry in entries if entry.filename.lower().endswith(".pdf")]
-
         if not pdf_entries:
-            raise HTTPException(status_code=400, detail="ZIP contains no PDF files")
+            raise HTTPException(status_code=400, detail="Die ZIP-Datei enthält keine PDF-Dateien.")
         if len(pdf_entries) > MAX_ZIP_PDF_FILES:
-            raise HTTPException(
-                status_code=400,
-                detail=f"ZIP contains too many PDFs (max {MAX_ZIP_PDF_FILES})",
-            )
-
+            raise HTTPException(status_code=400, detail=f"Zu viele PDFs in der ZIP-Datei (max. {MAX_ZIP_PDF_FILES}).")
+        _ensure_property_document_limit_not_exceeded(db, property_obj.id, incoming_docs=len(pdf_entries))
         total_pdf_size = sum(entry.file_size for entry in pdf_entries)
         if total_pdf_size > MAX_ZIP_TOTAL_PDF_BYTES:
             raise HTTPException(
                 status_code=400,
-                detail=f"ZIP PDF content exceeds size limit ({MAX_ZIP_TOTAL_PDF_BYTES} bytes)",
+                detail=f"Gesamtgröße der PDFs in der ZIP überschreitet das Limit ({MAX_ZIP_TOTAL_PDF_BYTES} Bytes).",
             )
-
-        processed_docs = []
-        failed_docs = []
-        for entry in pdf_entries:
-            inner_name = _sanitize_filename(entry.filename)
-            try:
-                inner_content = archive.read(entry)
-                if not inner_content.startswith(b"%PDF"):
-                    raise HTTPException(status_code=400, detail="Uploaded file is not a valid PDF")
-                processed_docs.append(_ingest_pdf_content(db, inner_name, inner_content))
-            except HTTPException as e:
-                failed_docs.append({
-                    "filename": inner_name,
-                    "reason": str(e.detail),
-                })
-            except Exception:
-                failed_docs.append({
-                    "filename": inner_name,
-                    "reason": "Failed to process PDF from ZIP",
-                })
-
-    if not processed_docs:
-        raise HTTPException(status_code=400, detail="No valid PDFs could be processed from ZIP")
+    if background_tasks is not None:
+        background_tasks.add_task(_process_zip_in_background, property_obj.id, content)
+    else:
+        _process_zip_in_background(property_obj.id, content)
 
     return {
         "archive_filename": safe_filename,
-        "processed_count": len(processed_docs),
-        "failed_count": len(failed_docs),
-        "documents": processed_docs,
-        "failed_documents": failed_docs,
+        "property_id": property_obj.id,
+        "processed_count": 0,
+        "failed_count": 0,
+        "timeline_items_upserted": 0,
+        "documents": [],
+        "failed_documents": [],
+        "queued": True,
+        "message": "ZIP-Verarbeitung wurde gestartet. Dokumente erscheinen nach der Hintergrundverarbeitung.",
+    }
+
+
+@router.delete("/{document_id}")
+def delete_document(
+    document_id: int,
+    property_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    get_owned_property_or_404(db, current_user.id, property_id)
+    doc = db.query(Document).filter(Document.id == document_id, Document.property_id == property_id).first()
+    if not doc:
+        raise HTTPException(status_code=404, detail="Dokument nicht gefunden")
+
+    try:
+        deleted_chunks = (
+            db.query(Chunk)
+            .filter(Chunk.document_id == doc.id)
+            .delete(synchronize_session=False)
+        )
+        deleted_timeline_items = (
+            db.query(TimelineItem)
+            .filter(TimelineItem.document_id == doc.id)
+            .delete(synchronize_session=False)
+        )
+        db.delete(doc)
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise HTTPException(status_code=500, detail="Dokument konnte nicht gelöscht werden")
+
+    return {
+        "ok": True,
+        "document_id": document_id,
+        "property_id": property_id,
+        "deleted_chunks": deleted_chunks,
+        "deleted_timeline_items": deleted_timeline_items,
     }

@@ -9,7 +9,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 from app.config import settings
 from app.db import Base, SessionLocal, engine
-from app.models import Document
+from app.models import Document, Property
 from app.pdf_ingest import extract_text_from_pdf, simple_chunk
 from app.rag import upsert_chunks
 
@@ -25,16 +25,7 @@ def list_pdf_paths(upload_dir: str) -> List[str]:
     return paths
 
 
-def _reset_faiss_files() -> None:
-    os.makedirs(settings.FAISS_DIR, exist_ok=True)
-    index_path = os.path.join(settings.FAISS_DIR, "index.faiss")
-    meta_path = os.path.join(settings.FAISS_DIR, "meta.json")
-    for path in (index_path, meta_path):
-        if os.path.exists(path):
-            os.remove(path)
-
-
-def _ingest_pdf(db, pdf_path: str, reindex: bool) -> tuple[bool, bool]:
+def _ingest_pdf(db, pdf_path: str, reindex: bool, property_id: int) -> tuple[bool, bool]:
     """
     Returns:
     - (processed, was_skipped)
@@ -49,18 +40,19 @@ def _ingest_pdf(db, pdf_path: str, reindex: bool) -> tuple[bool, bool]:
     created_doc = False
     doc = existing
     if doc is None:
-        doc = Document(filename=filename, path=pdf_path)
+        doc = Document(filename=filename, path=pdf_path, property_id=property_id)
         db.add(doc)
         db.flush()
         created_doc = True
 
     text = extract_text_from_pdf(pdf_path)
+    doc.extracted_text = text
     chunks = simple_chunk(text)
     payload = [
         {"document_id": doc.id, "chunk_id": f"{doc.id}-{i}", "text": ch}
         for i, ch in enumerate(chunks)
     ]
-    upsert_chunks(payload, settings.FAISS_DIR)
+    upsert_chunks(db, payload)
     if created_doc:
         db.commit()
     print(f"OK: {filename} -> {len(payload)} chunks")
@@ -69,12 +61,18 @@ def _ingest_pdf(db, pdf_path: str, reindex: bool) -> tuple[bool, bool]:
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Bulk ingest PDFs from UPLOAD_DIR into DB + FAISS."
+        description="Bulk ingest PDFs from UPLOAD_DIR into DB."
     )
     parser.add_argument(
         "--reindex",
         action="store_true",
-        help="Rebuild FAISS index from all PDFs in UPLOAD_DIR (ignores skip-by-existing behavior).",
+        help="Recompute chunk embeddings from all PDFs in UPLOAD_DIR (ignores skip-by-existing behavior).",
+    )
+    parser.add_argument(
+        "--property-id",
+        type=int,
+        required=True,
+        help="Property ID that will own ingested documents.",
     )
     return parser.parse_args()
 
@@ -83,11 +81,6 @@ def main():
     args = parse_args()
     Base.metadata.create_all(bind=engine)
     os.makedirs(settings.UPLOAD_DIR, exist_ok=True)
-    os.makedirs(settings.FAISS_DIR, exist_ok=True)
-
-    if args.reindex:
-        _reset_faiss_files()
-        print("Reindex mode: cleared existing FAISS index/meta files.")
 
     db = SessionLocal()
     total = 0
@@ -96,10 +89,15 @@ def main():
     failed = 0
 
     try:
+        if not db.query(Property).filter(Property.id == args.property_id).first():
+            raise RuntimeError(f"Property {args.property_id} does not exist")
+        if args.reindex:
+            print("Reindex mode: recomputing chunk embeddings.")
+
         for pdf_path in list_pdf_paths(settings.UPLOAD_DIR):
             total += 1
             try:
-                processed, skipped = _ingest_pdf(db, pdf_path, reindex=args.reindex)
+                processed, skipped = _ingest_pdf(db, pdf_path, reindex=args.reindex, property_id=args.property_id)
                 if skipped:
                     skipped_existing += 1
                 if processed:

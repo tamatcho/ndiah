@@ -1,8 +1,9 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import StatusBanner from "../StatusBanner";
 import { TimelineItem, UiState } from "../../types";
 
 type Props = {
+  disabled?: boolean;
   state: UiState;
   message: string;
   details?: string;
@@ -14,6 +15,7 @@ type Props = {
   timelineCategories: string[];
   timelineCurrentGrouped: [string, TimelineItem[]][];
   timelineArchiveGrouped: [string, TimelineItem[]][];
+  animationSeed: number;
   pending: boolean;
   onInputChange: (value: string) => void;
   onExtract: () => void;
@@ -27,6 +29,7 @@ type Props = {
 export default function TimelineCard(props: Props) {
   const [archiveMounted, setArchiveMounted] = useState(false);
   const [archiveClosing, setArchiveClosing] = useState(false);
+  const [lastAnimatedSeed, setLastAnimatedSeed] = useState<number | null>(null);
   const formatGroupDate = (dateIso: string) => {
     const date = new Date(dateIso);
     if (Number.isNaN(date.getTime())) return dateIso;
@@ -40,38 +43,42 @@ export default function TimelineCard(props: Props) {
     return `${clean.slice(0, maxLen - 1)}…`;
   };
 
+  const categoryRank = (category: string) => {
+    const normalized = props.normalizeCategory(category || "info");
+    if (normalized === "deadline") return 0;
+    if (normalized === "payment") return 1;
+    if (normalized === "meeting") return 2;
+    if (normalized === "info") return 3;
+    return 4; // tax
+  };
+
+  const shouldAnimateBatch =
+    lastAnimatedSeed !== props.animationSeed &&
+    !((window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches) ?? false);
+  useEffect(() => {
+    if (lastAnimatedSeed !== props.animationSeed) {
+      setLastAnimatedSeed(props.animationSeed);
+    }
+  }, [lastAnimatedSeed, props.animationSeed]);
+
   const renderGroupedCards = (grouped: [string, TimelineItem[]][], withAnimation = false, archived = false) => {
     let animatedCardsCount = 0;
     return grouped.map(([dateIso, items]) => {
       const sortedItems = [...items].sort((a, b) => {
-        const pa =
-          props.normalizeCategory(a.category || "info") === "deadline"
-            ? 0
-            : props.normalizeCategory(a.category || "info") === "payment"
-              ? 1
-              : props.normalizeCategory(a.category || "info") === "meeting"
-                ? 2
-                : 3;
-        const pb =
-          props.normalizeCategory(b.category || "info") === "deadline"
-            ? 0
-            : props.normalizeCategory(b.category || "info") === "payment"
-              ? 1
-              : props.normalizeCategory(b.category || "info") === "meeting"
-                ? 2
-                : 3;
+        const pa = categoryRank(a.category || "info");
+        const pb = categoryRank(b.category || "info");
         if (pa !== pb) return pa - pb;
         return (a.time_24h || "99:99").localeCompare(b.time_24h || "99:99");
       });
 
-      const hasAnimatedCardInGroup = withAnimation && animatedCardsCount < 5;
+      const hasAnimatedCardInGroup = withAnimation && shouldAnimateBatch && animatedCardsCount < 5;
 
       return (
         <section className={`timeline-group ${hasAnimatedCardInGroup ? "timeline-group-animated" : ""}`} key={dateIso}>
           <div className="timeline-group-date">{formatGroupDate(dateIso)}</div>
           <div className="timeline-cards">
             {sortedItems.map((item, idx) => {
-              const shouldAnimateCard = withAnimation && animatedCardsCount < 5;
+              const shouldAnimateCard = withAnimation && shouldAnimateBatch && animatedCardsCount < 5;
               if (shouldAnimateCard) animatedCardsCount += 1;
               return (
                 <article
@@ -153,6 +160,35 @@ export default function TimelineCard(props: Props) {
         ? "Nächster Termin heute"
         : `Nächster Termin in ${nextEventDays} Tag${nextEventDays === 1 ? "" : "en"}`;
 
+  const nextDeadline = visibleItems
+    .filter((item) => props.normalizeCategory(item.category || "info") === "deadline")
+    .map((item) => new Date(item.date_iso))
+    .filter((dt) => !Number.isNaN(dt.getTime()))
+    .sort((a, b) => a.getTime() - b.getTime())[0];
+
+  const duePayments30d = visibleItems.filter((item) => {
+    const category = props.normalizeCategory(item.category || "info");
+    if (category !== "payment") return false;
+    const dt = new Date(item.date_iso);
+    if (Number.isNaN(dt.getTime())) return false;
+    const in30 = new Date(today);
+    in30.setDate(in30.getDate() + 30);
+    return dt >= today && dt <= in30;
+  }).length;
+
+  const actionSummary = (() => {
+    if (openDeadlines > 0 && nextDeadline) {
+      return `${openDeadlines} Frist${openDeadlines === 1 ? "" : "en"} stehen an (nächste: ${nextDeadline.toLocaleDateString("de-DE")}).`;
+    }
+    if (duePayments30d > 0) {
+      return `${duePayments30d} Zahlung${duePayments30d === 1 ? "" : "en"} fällig innerhalb von 30 Tagen.`;
+    }
+    if (openDeadlines === 0) {
+      return `Keine offenen Fristen. ${nextEventSummary}.`;
+    }
+    return `${deadlinesSummary}. ${paymentsSummary}.`;
+  })();
+
   const isReducedMotion = () => window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches ?? false;
   const archiveOpen = archiveMounted && !archiveClosing;
 
@@ -195,8 +231,8 @@ export default function TimelineCard(props: Props) {
         <div className="timeline-sticky-header">
           <StatusBanner state={props.state} message={props.message} details={props.details} />
           <div className="row wrap">
-            <button className="btn btn-secondary" onClick={props.onExtractDocuments} disabled={!props.hasDocuments || props.pending}>
-              Timeline aktualisieren (aus hochgeladenen Dokumenten)
+            <button className="btn btn-secondary" onClick={props.onExtractDocuments} disabled={props.disabled || !props.hasDocuments || props.pending}>
+              Timeline aktualisieren
             </button>
           </div>
           {!props.hasDocuments ? (
@@ -207,7 +243,7 @@ export default function TimelineCard(props: Props) {
 
           {props.state === "error" ? (
             <div className="empty-actions">
-              <button className="chip" disabled={props.pending} onClick={props.onRetry}>
+              <button className="chip" disabled={props.pending || props.disabled} onClick={props.onRetry}>
                 Erneut versuchen
               </button>
             </div>
@@ -218,10 +254,10 @@ export default function TimelineCard(props: Props) {
               type="text"
               placeholder="Suche in Titel/Beschreibung..."
               value={props.timelineSearch}
-              disabled={props.pending}
+              disabled={props.pending || props.disabled}
               onChange={(e) => props.onSearchChange(e.target.value)}
             />
-            <select value={props.timelineCategory} disabled={props.pending} onChange={(e) => props.onCategoryChange(e.target.value)}>
+            <select value={props.timelineCategory} disabled={props.pending || props.disabled} onChange={(e) => props.onCategoryChange(e.target.value)}>
               <option value="">Alle Kategorien</option>
               {props.timelineCategories.map((cat) => (
                 <option key={cat} value={cat}>
@@ -240,11 +276,11 @@ export default function TimelineCard(props: Props) {
               rows={8}
               placeholder="Dokumenttext einfügen..."
               value={props.timelineInput}
-              disabled={props.pending}
+              disabled={props.pending || props.disabled}
               onChange={(e) => props.onInputChange(e.target.value)}
             />
             <div className="row wrap">
-              <button className="btn" disabled={props.pending} onClick={props.onExtract}>
+              <button className="btn" disabled={props.pending || props.disabled} onClick={props.onExtract}>
                 Aus Rohtext extrahieren
               </button>
             </div>
@@ -252,9 +288,7 @@ export default function TimelineCard(props: Props) {
         </details>
         </div>
         <div className="timeline-summary" aria-label="Timeline-Zusammenfassung">
-        <div className="timeline-summary-item">{deadlinesSummary}</div>
-        <div className="timeline-summary-item">{paymentsSummary}</div>
-        <div className="timeline-summary-item">{nextEventSummary}</div>
+        <div className="timeline-summary-item timeline-summary-main">{actionSummary}</div>
         </div>
         <div className="timeline-list">
         {props.timelineItems.length === 0 ? (

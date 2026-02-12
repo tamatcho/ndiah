@@ -751,17 +751,23 @@ select:focus-visible {
 
 .doc-item {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto auto;
-  gap: 12px;
-  align-items: start;
+  gap: 8px;
   padding: 10px 10px;
   border-radius: 10px;
   background: rgba(255, 255, 255, 0.92);
   font-size: 0.9rem;
+  border: 1px solid #e6ebf3;
 }
 
 .doc-item:hover {
   background: #fcfdff;
+}
+
+.doc-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  gap: 12px;
+  align-items: start;
 }
 
 .doc-main {
@@ -791,8 +797,8 @@ select:focus-visible {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 0.97rem;
-  font-weight: 700;
+  font-size: 1.02rem;
+  font-weight: 760;
 }
 
 .doc-time {
@@ -803,10 +809,11 @@ select:focus-visible {
 
 .doc-status-badge {
   border-radius: 999px;
-  padding: 2px 7px;
-  font-size: 0.71rem;
+  padding: 2px 8px;
+  font-size: 0.7rem;
   font-weight: 600;
   white-space: nowrap;
+  opacity: 0.9;
 }
 
 .doc-status-badge.status-indexed {
@@ -864,13 +871,25 @@ select:focus-visible {
   gap: 4px;
 }
 
-.doc-menu-details {
+.doc-details-panel {
+  border-top: 1px dashed #dde5f1;
+  padding: 8px 4px 2px;
+  display: grid;
+  gap: 4px;
+  font-size: 0.8rem;
+  color: #4a566d;
+}
+
+.doc-details-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.doc-details-key {
   color: #6a7285;
-  font-size: 0.73rem;
-  line-height: 1.35;
-  border-bottom: 1px solid #edf1f7;
-  padding: 2px 2px 6px;
-  margin-bottom: 2px;
+  font-weight: 600;
 }
 
 .doc-menu-item {
@@ -966,10 +985,31 @@ select:focus-visible {
   padding: 8px 10px;
 }
 
+.timeline-summary-main {
+  grid-column: 1 / -1;
+}
+
 .timeline-hint {
   margin-top: 8px;
   font-size: 0.86rem;
   color: var(--muted);
+}
+
+.coldstart-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 6px 0 10px;
+  padding: 8px 10px;
+  border: 1px solid #e1e8f4;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.9);
+}
+
+.coldstart-banner-text {
+  font-size: 0.85rem;
+  color: #4b566f;
 }
 
 .timeline-advanced {
@@ -1355,6 +1395,10 @@ select:focus-visible {
   border-color: rgba(196, 45, 45, 0.4);
 }
 
+.toast-warning {
+  border-color: rgba(200, 138, 20, 0.45);
+}
+
 .toast-icon {
   width: 18px;
   text-align: center;
@@ -1368,6 +1412,10 @@ select:focus-visible {
 
 .toast-error .toast-icon {
   color: #ba2c2c;
+}
+
+.toast-warning .toast-icon {
+  color: #9c6a00;
 }
 
 .toast-title {

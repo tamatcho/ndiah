@@ -1,8 +1,18 @@
 import os
+import io
 from pypdf import PdfReader
 
 def extract_text_from_pdf(path: str) -> str:
     reader = PdfReader(path)
+    parts = []
+    for i, page in enumerate(reader.pages):
+        txt = page.extract_text() or ""
+        parts.append(f"\n\n--- PAGE {i+1} ---\n{txt}")
+    return "\n".join(parts)
+
+
+def extract_text_from_pdf_bytes(content: bytes) -> str:
+    reader = PdfReader(io.BytesIO(content))
     parts = []
     for i, page in enumerate(reader.pages):
         txt = page.extract_text() or ""

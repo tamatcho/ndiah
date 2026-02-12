@@ -1,11 +1,13 @@
-import os
 import json
 import numpy as np
-import faiss
 from openai import OpenAI
+from sqlalchemy.orm import Session
+
 from .config import settings
+from .models import Chunk, Document, Property
 
 client = OpenAI(api_key=settings.OPENAI_API_KEY)
+
 
 def embed_texts(texts: list[str]) -> np.ndarray:
     if not texts:
@@ -17,87 +19,83 @@ def embed_texts(texts: list[str]) -> np.ndarray:
     vecs = [d.embedding for d in resp.data]
     return np.array(vecs, dtype="float32")
 
-def ensure_index(dim: int, index_path: str):
-    if os.path.exists(index_path):
-        try:
-            return faiss.read_index(index_path)
-        except Exception as e:
-            raise RuntimeError("Failed to read FAISS index from disk") from e
-    return faiss.IndexFlatIP(dim)
 
-def save_meta(meta_path: str, meta: list[dict]):
-    try:
-        with open(meta_path, "w", encoding="utf-8") as f:
-            json.dump(meta, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        raise RuntimeError("Failed to write FAISS metadata file") from e
-
-def load_meta(meta_path: str) -> list[dict]:
-    if not os.path.exists(meta_path):
-        return []
-    try:
-        with open(meta_path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception as e:
-        raise RuntimeError("Failed to read FAISS metadata file") from e
-
-def upsert_chunks(chunks: list[dict], faiss_dir: str):
+def upsert_chunks(db: Session, chunks: list[dict]):
     """
-    chunks: [{ "chunk_id": "...", "text": "...", "document_id": 1 }]
+    chunks: [{ "document_id": 1, "chunk_id": "1-0", "text": "..." }]
     """
     if not chunks:
         return
-    os.makedirs(faiss_dir, exist_ok=True)
-    index_path = os.path.join(faiss_dir, "index.faiss")
-    meta_path = os.path.join(faiss_dir, "meta.json")
-
     texts = [c["text"] for c in chunks]
     vecs = embed_texts(texts)
-    dim = vecs.shape[1]
 
-    index = ensure_index(dim, index_path)
-    # cosine via inner product -> normalize
-    faiss.normalize_L2(vecs)
+    doc_id = chunks[0]["document_id"]
+    db.query(Chunk).filter(Chunk.document_id == doc_id).delete(synchronize_session=False)
+    for chunk, vec in zip(chunks, vecs):
+        db.add(
+            Chunk(
+                document_id=chunk["document_id"],
+                chunk_id=chunk["chunk_id"],
+                text=chunk["text"],
+                embedding_json=json.dumps(vec.tolist(), ensure_ascii=False),
+            )
+        )
 
-    meta = load_meta(meta_path)
 
-    # add
-    index.add(vecs)
-    meta.extend([{**c} for c in chunks])
+def _cosine_similarity(query_vec: np.ndarray, embeddings: np.ndarray) -> np.ndarray:
+    q_norm = np.linalg.norm(query_vec)
+    if q_norm == 0:
+        return np.zeros((embeddings.shape[0],), dtype=np.float32)
+    emb_norms = np.linalg.norm(embeddings, axis=1)
+    denom = emb_norms * q_norm
+    denom[denom == 0] = 1e-12
+    return (embeddings @ query_vec) / denom
 
-    try:
-        faiss.write_index(index, index_path)
-    except Exception as e:
-        raise RuntimeError("Failed to persist FAISS index to disk") from e
-    save_meta(meta_path, meta)
 
-def search(query: str, faiss_dir: str, k: int = 6) -> list[dict]:
-    index_path = os.path.join(faiss_dir, "index.faiss")
-    meta_path = os.path.join(faiss_dir, "meta.json")
-    if not os.path.exists(index_path):
+def search(query: str, db: Session, user_id: int, property_id: int | None = None, k: int = 6) -> list[dict]:
+    qv = embed_texts([query])
+    if qv.size == 0:
+        return []
+    query_vec = qv[0]
+
+    sql = (
+        db.query(Chunk, Document.property_id)
+        .join(Document, Chunk.document_id == Document.id)
+        .join(Property, Document.property_id == Property.id)
+        .filter(Property.user_id == user_id)
+    )
+    if property_id is not None:
+        sql = sql.filter(Document.property_id == property_id)
+    rows = sql.all()
+    if not rows:
         return []
 
-    try:
-        index = faiss.read_index(index_path)
-    except Exception as e:
-        raise RuntimeError("Failed to read FAISS index from disk") from e
-    meta = load_meta(meta_path)
-
-    qv = embed_texts([query])
-    faiss.normalize_L2(qv)
-
-    k = max(1, k)
-    try:
-        scores, ids = index.search(qv, k)
-    except Exception as e:
-        raise RuntimeError("FAISS search failed") from e
-    results = []
-    for score, idx in zip(scores[0], ids[0]):
-        if idx == -1:
+    candidates: list[dict] = []
+    vectors: list[list[float]] = []
+    for chunk, doc_property_id in rows:
+        if not chunk.embedding_json:
             continue
-        item = meta[idx]
-        results.append({"score": float(score), **item})
-    return results
+        try:
+            vectors.append(json.loads(chunk.embedding_json))
+        except Exception:
+            continue
+        candidates.append(
+            {
+                "document_id": chunk.document_id,
+                "property_id": doc_property_id,
+                "chunk_id": chunk.chunk_id,
+                "text": chunk.text,
+            }
+        )
+    if not candidates:
+        return []
+
+    emb_matrix = np.array(vectors, dtype=np.float32)
+    scores = _cosine_similarity(query_vec, emb_matrix)
+    top_k = max(1, k)
+    best_idx = np.argsort(scores)[::-1][:top_k]
+    return [{**candidates[i], "score": float(scores[i])} for i in best_idx]
+
 
 def answer_with_context(question: str, contexts: list[dict]) -> str:
     context_text = "\n\n".join(

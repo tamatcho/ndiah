@@ -2,13 +2,22 @@ from sqlalchemy.orm import Session
 
 from .extractors import extract_timeline
 from .models import Document, TimelineItem
-from .pdf_ingest import extract_text_from_pdf
+from .pdf_ingest import extract_text_from_pdf, extract_text_from_pdf_bytes
 
 
 def extract_and_store_timeline_for_document(
     db: Session, doc: Document, raw_text: str | None = None
 ) -> list[dict]:
-    text = raw_text if raw_text is not None else extract_text_from_pdf(doc.path)
+    if raw_text is not None:
+        text = raw_text
+    elif doc.extracted_text:
+        text = doc.extracted_text
+    elif doc.file_bytes:
+        text = extract_text_from_pdf_bytes(doc.file_bytes)
+    elif doc.path:
+        text = extract_text_from_pdf(doc.path)
+    else:
+        text = ""
     if not (text or "").strip():
         return []
 
@@ -23,6 +32,7 @@ def extract_and_store_timeline_for_document(
             [
                 TimelineItem(
                     document_id=doc.id,
+                    property_id=doc.property_id,
                     title=item["title"],
                     date_iso=item["date_iso"],
                     time_24h=item.get("time_24h"),

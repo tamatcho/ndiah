@@ -1,13 +1,15 @@
+import type { KeyboardEvent } from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import ChatCard from "./components/cards/ChatCard";
 import TimelineCard from "./components/cards/TimelineCard";
 import UploadCard from "./components/cards/UploadCard";
 import ToastContainer from "./components/ToastContainer";
-import { apiCall, normalizeApiError, uploadWithProgress } from "./lib/api";
-import { ChatMessage, DocumentItem, DocumentStatus, Source, TimelineItem, Toast, UiState } from "./types";
+import { ApiError, apiFetch, normalizeApiError, uploadWithProgress } from "./lib/api";
+import { AuthUser, ChatMessage, DocumentItem, DocumentStatus, PropertyItem, Source, TimelineItem, Toast, UiState } from "./types";
 
 const BASE_KEY = "property_ai_base_url";
-const CHAT_HISTORY_KEY = "property_ai_chat_history";
+const CHAT_HISTORY_KEY_PREFIX = "property_ai_chat_history";
+const ACTIVE_PROPERTY_KEY = "property_ai_active_property_id";
 const DEFAULT_API_BASE = (import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8000").replace(/\/+$/, "");
 const MAX_FILE_SIZE = 20 * 1024 * 1024;
 const EXAMPLE_QUESTIONS = [
@@ -21,7 +23,7 @@ function uuid() {
 }
 
 function normalizeCategory(category: string) {
-  return ["meeting", "payment", "deadline", "info"].includes(category) ? category : "info";
+  return ["meeting", "payment", "deadline", "info", "tax"].includes(category) ? category : "info";
 }
 
 function timelinePriority(category: string) {
@@ -29,7 +31,8 @@ function timelinePriority(category: string) {
   if (normalized === "deadline") return 0;
   if (normalized === "payment") return 1;
   if (normalized === "meeting") return 2;
-  return 3;
+  if (normalized === "info") return 3;
+  return 4;
 }
 
 export default function App() {
@@ -39,6 +42,21 @@ export default function App() {
 
   const [apiState, setApiState] = useState<UiState>("idle");
   const [apiOutput, setApiOutput] = useState("");
+  const [firstHealthChecked, setFirstHealthChecked] = useState(false);
+  const [showColdStartBanner, setShowColdStartBanner] = useState(false);
+  const [currentUser, setCurrentUser] = useState<AuthUser | null>(null);
+  const [authEmail, setAuthEmail] = useState("");
+  const [authPending, setAuthPending] = useState(false);
+  const [magicLink, setMagicLink] = useState("");
+  const [properties, setProperties] = useState<PropertyItem[]>([]);
+  const [newPropertyName, setNewPropertyName] = useState("");
+  const [propertiesPending, setPropertiesPending] = useState(false);
+  const [activePropertyId, setActivePropertyId] = useState<number | null>(() => {
+    const raw = localStorage.getItem(ACTIVE_PROPERTY_KEY);
+    if (!raw) return null;
+    const parsed = Number(raw);
+    return Number.isFinite(parsed) ? parsed : null;
+  });
 
   const [uploadState, setUploadState] = useState<UiState>("idle");
   const [uploadMessage, setUploadMessage] = useState("Bereit");
@@ -59,21 +77,14 @@ export default function App() {
   const [chatDetails, setChatDetails] = useState("Frage zu indexierten Dokumenten stellen.");
   const [chatQuestion, setChatQuestion] = useState("");
   const [chatPending, setChatPending] = useState(false);
-  const [chatHistory, setChatHistory] = useState<ChatMessage[]>(() => {
-    try {
-      const raw = localStorage.getItem(CHAT_HISTORY_KEY);
-      const parsed = raw ? JSON.parse(raw) : [];
-      return Array.isArray(parsed) ? parsed : [];
-    } catch {
-      return [];
-    }
-  });
+  const [chatHistory, setChatHistory] = useState<ChatMessage[]>([]);
 
   const [timelineState, setTimelineState] = useState<UiState>("idle");
   const [timelineMessage, setTimelineMessage] = useState("Bereit");
   const [timelineDetails, setTimelineDetails] = useState("Rohtext einfügen und Termine extrahieren.");
   const [timelineInput, setTimelineInput] = useState("");
   const [timelineItems, setTimelineItems] = useState<TimelineItem[]>([]);
+  const [timelineRenderSeed, setTimelineRenderSeed] = useState(0);
   const [timelineSearch, setTimelineSearch] = useState("");
   const [timelineCategory, setTimelineCategory] = useState("");
   const [lastChatQuestion, setLastChatQuestion] = useState("");
@@ -88,8 +99,31 @@ export default function App() {
   }, [apiBase]);
 
   useEffect(() => {
-    localStorage.setItem(CHAT_HISTORY_KEY, JSON.stringify(chatHistory));
-  }, [chatHistory]);
+    if (activePropertyId == null) {
+      localStorage.removeItem(ACTIVE_PROPERTY_KEY);
+    } else {
+      localStorage.setItem(ACTIVE_PROPERTY_KEY, String(activePropertyId));
+    }
+  }, [activePropertyId]);
+
+  useEffect(() => {
+    if (!activePropertyId) return;
+    localStorage.setItem(`${CHAT_HISTORY_KEY_PREFIX}:${activePropertyId}`, JSON.stringify(chatHistory));
+  }, [chatHistory, activePropertyId]);
+
+  useEffect(() => {
+    if (!activePropertyId) {
+      setChatHistory([]);
+      return;
+    }
+    try {
+      const raw = localStorage.getItem(`${CHAT_HISTORY_KEY_PREFIX}:${activePropertyId}`);
+      const parsed = raw ? JSON.parse(raw) : [];
+      setChatHistory(Array.isArray(parsed) ? parsed : []);
+    } catch {
+      setChatHistory([]);
+    }
+  }, [activePropertyId]);
 
   useEffect(() => {
     if (!chatHistoryRef.current) return;
@@ -104,9 +138,123 @@ export default function App() {
     }, 3000);
   };
 
-  const loadDocuments = async () => {
+  const loadMe = async () => {
     try {
-      const { data: docs } = await apiCall<DocumentItem[]>(`${apiBase}/documents`);
+      const { data } = await apiFetch<AuthUser>(`${apiBase}/auth/me`);
+      setCurrentUser(data);
+      return data;
+    } catch {
+      setCurrentUser(null);
+      return null;
+    }
+  };
+
+  const loadProperties = async () => {
+    try {
+      const { data } = await apiFetch<PropertyItem[]>(`${apiBase}/properties`);
+      const list = Array.isArray(data) ? data : [];
+      setProperties(list);
+      if (!list.some((p) => p.id === activePropertyId)) {
+        setActivePropertyId(list[0]?.id ?? null);
+      }
+      return list;
+    } catch (e) {
+      setProperties([]);
+      setActivePropertyId(null);
+      addToast("error", "Properties konnten nicht geladen werden", normalizeApiError(e));
+      return [];
+    }
+  };
+
+  const requestMagicLink = async () => {
+    const email = authEmail.trim();
+    if (!email) {
+      addToast("error", "E-Mail fehlt", "Bitte E-Mail eingeben.");
+      return;
+    }
+    setAuthPending(true);
+    setMagicLink("");
+    try {
+      const { data } = await apiFetch<{ magic_link?: string }>(`${apiBase}/auth/request-link`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email })
+      });
+      if (data.magic_link) {
+        setMagicLink(data.magic_link);
+      }
+      addToast("success", "Login-Link angefordert", data.magic_link ? "DEV-Link verfügbar." : "Prüfe dein E-Mail-Postfach.");
+    } catch (e) {
+      addToast("error", "Login-Link fehlgeschlagen", normalizeApiError(e));
+    } finally {
+      setAuthPending(false);
+    }
+  };
+
+  const verifyMagicLink = async () => {
+    if (!magicLink) return;
+    setAuthPending(true);
+    try {
+      await apiFetch<{ user: AuthUser }>(`${apiBase}${magicLink}`);
+      const me = await loadMe();
+      if (me) {
+        addToast("success", "Eingeloggt", me.email);
+        await loadProperties();
+      }
+    } catch (e) {
+      addToast("error", "Verifizierung fehlgeschlagen", normalizeApiError(e));
+    } finally {
+      setAuthPending(false);
+    }
+  };
+
+  const logout = async () => {
+    setAuthPending(true);
+    try {
+      await apiFetch<{ ok: boolean }>(`${apiBase}/auth/logout`, { method: "POST" });
+    } finally {
+      setCurrentUser(null);
+      setProperties([]);
+      setActivePropertyId(null);
+      setDocuments([]);
+      setTimelineItems([]);
+      setAuthPending(false);
+    }
+  };
+
+  const createProperty = async () => {
+    const name = newPropertyName.trim();
+    if (!name) {
+      addToast("error", "Property-Name fehlt");
+      return;
+    }
+    setPropertiesPending(true);
+    try {
+      const { data } = await apiFetch<PropertyItem>(`${apiBase}/properties`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name })
+      });
+      setProperties((prev) => [data, ...prev]);
+      setActivePropertyId(data.id);
+      setNewPropertyName("");
+      addToast("success", "Property erstellt", data.name);
+    } catch (e) {
+      addToast("error", "Property konnte nicht erstellt werden", normalizeApiError(e));
+    } finally {
+      setPropertiesPending(false);
+    }
+  };
+
+  const loadDocuments = async () => {
+    if (!currentUser || !activePropertyId) {
+      setDocuments([]);
+      return [];
+    }
+    try {
+      const { data: docs } = await apiFetch<DocumentItem[]>(
+        `${apiBase}/documents?property_id=${encodeURIComponent(activePropertyId)}`
+      );
       const normalized = Array.isArray(docs) ? docs : [];
       setDocuments(normalized);
       setDocumentStatuses((prev) => {
@@ -117,8 +265,12 @@ export default function App() {
         return next;
       });
       return normalized;
-    } catch {
-      // no-op
+    } catch (e: any) {
+      if (e?.status === 401) {
+        setCurrentUser(null);
+        setProperties([]);
+        setActivePropertyId(null);
+      }
       return [];
     }
   };
@@ -126,27 +278,38 @@ export default function App() {
   const runHealthCheck = async (withToast = false) => {
     setApiState("loading");
     try {
-      const { data, latencyMs: latency } = await apiCall<{ ok: boolean }>(`${apiBase}/health`, { timeoutMs: 10000 });
+      const { data, latencyMs: latency } = await apiFetch<{ ok: boolean }>(`${apiBase}/health`, { timeoutMs: 10000 });
       setApiOutput(JSON.stringify(data, null, 2));
       setApiState("success");
+      setShowColdStartBanner(false);
+      if (!firstHealthChecked) setFirstHealthChecked(true);
       if (withToast) addToast("success", "Backend erreichbar", `${latency} ms`);
-    } catch {
+    } catch (e) {
       setApiOutput(JSON.stringify({ error: "Backend nicht erreichbar." }, null, 2));
       setApiState("error");
+      if (!firstHealthChecked) {
+        if (e instanceof ApiError && (e.isTimeout || !e.status || e.status >= 500)) {
+          setShowColdStartBanner(true);
+        }
+        setFirstHealthChecked(true);
+      }
       if (withToast) addToast("error", "Backend nicht erreichbar", "Prüfe URL und Serverstatus, dann erneut versuchen.");
     }
   };
 
   useEffect(() => {
     const boot = async () => {
-      const docs = await loadDocuments();
-      if (docs.length > 0) {
-        await loadTimelineFromStore(false);
+      const me = await loadMe();
+      if (!me) return;
+      const props = await loadProperties();
+      const targetPropertyId = activePropertyId && props.some((p) => p.id === activePropertyId) ? activePropertyId : props[0]?.id ?? null;
+      if (targetPropertyId != null && targetPropertyId !== activePropertyId) {
+        setActivePropertyId(targetPropertyId);
       }
     };
     void boot();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [apiBase]);
 
   useEffect(() => {
     void runHealthCheck(false);
@@ -156,6 +319,24 @@ export default function App() {
     return () => window.clearInterval(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [apiBase]);
+
+  useEffect(() => {
+    const syncPropertyData = async () => {
+      if (!currentUser || !activePropertyId) {
+        setDocuments([]);
+        setTimelineItems([]);
+        return;
+      }
+      const docs = await loadDocuments();
+      if (docs.length > 0) {
+        await loadTimelineFromStore(false);
+      } else {
+        setTimelineItems([]);
+      }
+    };
+    void syncPropertyData();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentUser?.id, activePropertyId, apiBase]);
 
   const runHealth = async () => {
     await runHealthCheck(true);
@@ -171,7 +352,7 @@ export default function App() {
       await extractTimeline();
       return;
     }
-    await loadTimelineFromStore(true);
+    await rebuildTimeline();
   };
 
   const validateFiles = (files: File[]) => {
@@ -214,7 +395,41 @@ export default function App() {
     }
   };
 
+  const pollBackgroundZipProcessing = async (initialDocCount: number) => {
+    if (!activePropertyId) return;
+    const maxAttempts = 12;
+    const waitMs = 2500;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      await new Promise((resolve) => window.setTimeout(resolve, waitMs));
+      if (!activePropertyId) return;
+
+      try {
+        const latest = await loadDocuments();
+        if (latest.length > initialDocCount) {
+          setUploadState("success");
+          setUploadMessage("Hintergrundverarbeitung abgeschlossen");
+          setUploadDetails(`${latest.length - initialDocCount} neue(s) Dokument(e) verfügbar.`);
+          addToast("success", "ZIP-Verarbeitung abgeschlossen", `${latest.length - initialDocCount} neue(s) Dokument(e).`);
+          await rebuildTimeline(true);
+          return;
+        }
+      } catch {
+        // Continue polling; user can still refresh manually if needed.
+      }
+    }
+
+    addToast("warning", "ZIP-Verarbeitung läuft noch", "Dokumente werden weiter im Hintergrund verarbeitet.");
+  };
+
   const onUpload = async () => {
+    if (!activePropertyId) {
+      setUploadState("error");
+      setUploadMessage("Keine Property gewählt");
+      setUploadDetails("Bitte zuerst eine Property auswählen oder erstellen.");
+      addToast("error", "Upload fehlgeschlagen", "Keine Property ausgewählt.");
+      return;
+    }
     if (!selectedFiles.length) {
       setUploadErrors(["Bitte mindestens eine gültige PDF- oder ZIP-Datei auswählen."]);
       setUploadState("error");
@@ -234,17 +449,25 @@ export default function App() {
 
     let uploadedDocuments = 0;
     let failedItems = 0;
+    let queuedJobs = 0;
+    const initialDocCount = documents.length;
     const lines: string[] = [];
 
     for (let i = 0; i < selectedFiles.length; i += 1) {
       const file = selectedFiles[i];
       try {
-        const data = await uploadWithProgress(apiBase, file, (loaded, total) => {
+        const data = await uploadWithProgress(apiBase, activePropertyId, file, (loaded, total) => {
           const current = total ? loaded / total : 0;
           const overall = ((i + current) / selectedFiles.length) * 100;
           setProgressPercent(Math.max(0, Math.min(100, overall)));
           setProgressText(`${Math.round(overall)}% (${i + 1}/${selectedFiles.length}) ${file.name}`);
         });
+        if (data.queued) {
+          queuedJobs += 1;
+          lines.push(`IN ARBEIT ${file.name}: Hintergrundverarbeitung gestartet.`);
+          addToast("warning", "ZIP wird verarbeitet", data.message || "Bitte in Kürze erneut prüfen.");
+          continue;
+        }
         if (Array.isArray(data.documents)) {
           const processedCount = Number(data.processed_count || 0);
           const failedCount = Number(data.failed_count || 0);
@@ -254,6 +477,7 @@ export default function App() {
 
           for (const doc of data.documents) {
             lines.push(`OK ${doc.filename} (document_id: ${doc.document_id}, indexed chunks: ${doc.chunks_indexed})`);
+            addToast("success", `Dokument verarbeitet: ${doc.filename}`);
             if (typeof doc.document_id === "number") {
               setDocumentStatuses((prev) => ({ ...prev, [doc.document_id]: "indexed" }));
             }
@@ -266,6 +490,9 @@ export default function App() {
         } else {
           uploadedDocuments += 1;
           lines.push(`OK ${data.filename} (document_id: ${data.document_id}, indexed chunks: ${data.chunks_indexed})`);
+          if (data.filename) {
+            addToast("success", `Dokument verarbeitet: ${data.filename}`);
+          }
           if (typeof data.document_id === "number") {
             setDocumentStatuses((prev) => ({ ...prev, [data.document_id]: "indexed" }));
           }
@@ -281,7 +508,12 @@ export default function App() {
     setProgressPercent(100);
     setProgressText(`100% abgeschlossen`);
 
-    if (failedItems === 0) {
+    if (failedItems === 0 && queuedJobs > 0 && uploadedDocuments === 0) {
+      setUploadState("loading");
+      setUploadMessage("ZIP wird im Hintergrund verarbeitet");
+      setUploadDetails("Dokumente erscheinen automatisch, sobald die Verarbeitung fertig ist.");
+      addToast("warning", "Verarbeitung gestartet", "Die Dokumentliste wird automatisch aktualisiert.");
+    } else if (failedItems === 0) {
       setUploadState("success");
       setUploadMessage("Upload erfolgreich");
       setUploadDetails(`${uploadedDocuments} Dokument(e) verarbeitet.`);
@@ -308,12 +540,22 @@ export default function App() {
       setProgressText("0%");
     }, 600);
     await loadDocuments();
-    if (failedItems === 0 && uploadedDocuments > 0) {
-      await loadTimelineFromStore(false);
+    if (uploadedDocuments > 0) {
+      await rebuildTimeline(true);
+    }
+    if (queuedJobs > 0) {
+      void pollBackgroundZipProcessing(initialDocCount);
     }
   };
 
   const askChat = async (question: string) => {
+    if (!activePropertyId) {
+      setChatState("error");
+      setChatMessage("Keine Property gewählt");
+      setChatDetails("Bitte zuerst eine Property auswählen.");
+      addToast("error", "Chat fehlgeschlagen", "Keine Property ausgewählt.");
+      return;
+    }
     if (!question.trim()) {
       setChatState("error");
       setChatMessage("Leere Frage");
@@ -330,10 +572,10 @@ export default function App() {
     setChatMessage("Frage läuft...");
 
     try {
-      const { data } = await apiCall<{ answer: string; sources: Source[] }>(`${apiBase}/chat`, {
+      const { data } = await apiFetch<{ answer: string; sources: Source[] }>(`${apiBase}/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ question: q }),
+        body: JSON.stringify({ question: q, property_id: activePropertyId }),
         timeoutMs: 30000
       });
       setChatHistory((prev) => [
@@ -358,7 +600,7 @@ export default function App() {
 
   const loadSourceSnippet = async (messageId: string, source: Source) => {
     try {
-      const { data } = await apiCall<{ snippet: string }>(
+      const { data } = await apiFetch<{ snippet: string }>(
         `${apiBase}/documents/source?document_id=${encodeURIComponent(source.document_id)}&chunk_id=${encodeURIComponent(
           source.chunk_id
         )}`
@@ -377,6 +619,14 @@ export default function App() {
     }
   };
 
+  const onChatQuestionKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key !== "Enter") return;
+    if (e.shiftKey) return;
+    e.preventDefault();
+    if (chatPending) return;
+    void askChat(chatQuestion);
+  };
+
   const extractTimeline = async () => {
     if (!timelineInput.trim()) {
       setTimelineState("error");
@@ -388,7 +638,7 @@ export default function App() {
     setTimelineState("loading");
     setTimelineMessage("Extraktion läuft...");
     try {
-      const { data } = await apiCall<{ items: TimelineItem[] }>(`${apiBase}/timeline/extract`, {
+      const { data } = await apiFetch<{ items: TimelineItem[] }>(`${apiBase}/timeline/extract`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ raw_text: timelineInput }),
@@ -396,6 +646,7 @@ export default function App() {
       });
       const items = Array.isArray(data.items) ? data.items : [];
       setTimelineItems(items);
+      setTimelineRenderSeed((prev) => prev + 1);
       setTimelineState("success");
       setTimelineMessage("Timeline extrahiert");
       setTimelineDetails(`${items.length} Einträge gefunden.`);
@@ -410,6 +661,12 @@ export default function App() {
   };
 
   const loadTimelineFromStore = async (validateHasDocuments = true) => {
+    if (!activePropertyId) {
+      setTimelineState("error");
+      setTimelineMessage("Keine Property gewählt");
+      setTimelineDetails("Bitte zuerst eine Property auswählen.");
+      return;
+    }
     if (validateHasDocuments && documents.length === 0) {
       setTimelineState("error");
       setTimelineMessage("Keine Dokumente");
@@ -423,11 +680,15 @@ export default function App() {
     setTimelineMessage("Lade gespeicherte Timeline...");
     setTimelineDetails(`${documents.length} Dokument(e) im Bestand.`);
     try {
-      const { data } = await apiCall<TimelineItem[]>(`${apiBase}/timeline`, {
+      const { data } = await apiFetch<TimelineItem[]>(
+        `${apiBase}/timeline?property_id=${encodeURIComponent(activePropertyId)}`,
+        {
         timeoutMs: 15000
-      });
+        }
+      );
       const items = Array.isArray(data) ? data : [];
       setTimelineItems(items);
+      setTimelineRenderSeed((prev) => prev + 1);
       setTimelineState("success");
       setTimelineMessage("Timeline geladen");
       setTimelineDetails(`${items.length} Einträge aus persistierter Timeline.`);
@@ -441,15 +702,152 @@ export default function App() {
     }
   };
 
+  const rebuildTimeline = async (fromUpload = false) => {
+    if (!activePropertyId) {
+      setTimelineState("error");
+      setTimelineMessage("Keine Property gewählt");
+      setTimelineDetails("Bitte zuerst eine Property auswählen.");
+      return;
+    }
+    if (documents.length === 0) {
+      setTimelineState("error");
+      setTimelineMessage("Keine Dokumente");
+      setTimelineDetails("Bitte zuerst mindestens ein PDF hochladen.");
+      return;
+    }
+
+    setLastTimelineAction("load");
+    setTimelineState("loading");
+    setTimelineMessage("Timeline wird aktualisiert...");
+    try {
+      const { data } = await apiFetch<{ items_count: number; updated_at: string }>(
+        `${apiBase}/timeline/rebuild?property_id=${encodeURIComponent(activePropertyId)}`,
+        {
+          method: "POST",
+          timeoutMs: 60000
+        }
+      );
+      const { data: list } = await apiFetch<TimelineItem[]>(
+        `${apiBase}/timeline?property_id=${encodeURIComponent(activePropertyId)}`,
+        { timeoutMs: 15000 }
+      );
+      const items = Array.isArray(list) ? list : [];
+      setTimelineItems(items);
+      setTimelineRenderSeed((prev) => prev + 1);
+      setTimelineState("success");
+      setTimelineMessage("Timeline aktualisiert");
+      setTimelineDetails(`${data.items_count} neu berechnet, ${items.length} sichtbar.`);
+      if (fromUpload) {
+        addToast("success", "Timeline automatisch aktualisiert", `${data.items_count} Items neu berechnet`);
+      } else {
+        addToast("success", "Timeline aktualisiert", `${data.items_count} Items neu berechnet`);
+      }
+      return true;
+    } catch (e) {
+      const message = normalizeApiError(e, "Unbekannter Fehler");
+      if (fromUpload) {
+        addToast("warning", "Timeline konnte nicht automatisch aktualisiert werden", message);
+      } else {
+        setTimelineState("error");
+        setTimelineMessage("Timeline-Aktualisierung fehlgeschlagen");
+        setTimelineDetails(message);
+        addToast("error", "Timeline fehlgeschlagen", message);
+      }
+      return false;
+    }
+  };
+
   const onDeleteDocument = async (doc: DocumentItem) => {
-    addToast("error", "Löschen nicht verfügbar", `Kein Delete-Endpoint vorhanden (${doc.filename}).`);
+    if (!activePropertyId) {
+      addToast("error", "Löschen fehlgeschlagen", "Keine Property ausgewählt.");
+      return;
+    }
+    const confirmed = window.confirm(`Dokument wirklich löschen?\n\n${doc.filename}`);
+    if (!confirmed) return;
+
+    setDocumentActionsPending(true);
+    try {
+      await apiFetch<{ ok: boolean }>(
+        `${apiBase}/documents/${encodeURIComponent(doc.document_id)}?property_id=${encodeURIComponent(activePropertyId)}`,
+        { method: "DELETE", timeoutMs: 30000 }
+      );
+      setDocumentStatuses((prev) => {
+        const next = { ...prev };
+        delete next[doc.document_id];
+        return next;
+      });
+      const remainingDocs = await loadDocuments();
+      if (remainingDocs.length > 0) {
+        await loadTimelineFromStore(false);
+      } else {
+        setTimelineItems([]);
+        setTimelineState("idle");
+        setTimelineMessage("Bereit");
+        setTimelineDetails("Rohtext einfügen und Termine extrahieren.");
+      }
+      addToast("success", "Dokument gelöscht", doc.filename);
+    } catch (e) {
+      addToast("error", "Löschen fehlgeschlagen", normalizeApiError(e));
+    } finally {
+      setDocumentActionsPending(false);
+    }
+  };
+
+  const onDeleteAllDocuments = async () => {
+    if (!activePropertyId) {
+      addToast("error", "Löschen fehlgeschlagen", "Keine Property ausgewählt.");
+      return;
+    }
+    if (documents.length === 0) {
+      addToast("warning", "Keine Dokumente", "Es gibt nichts zu löschen.");
+      return;
+    }
+
+    const confirmed = window.confirm(
+      `Wirklich alle Dokumente in dieser Property löschen?\n\nAnzahl: ${documents.length}`
+    );
+    if (!confirmed) return;
+
+    setDocumentActionsPending(true);
+    try {
+      const toDelete = [...documents];
+      await Promise.all(
+        toDelete.map((doc) =>
+          apiFetch<{ ok: boolean }>(
+            `${apiBase}/documents/${encodeURIComponent(doc.document_id)}?property_id=${encodeURIComponent(activePropertyId)}`,
+            { method: "DELETE", timeoutMs: 30000 }
+          )
+        )
+      );
+      setDocumentStatuses((prev) => {
+        const next = { ...prev };
+        for (const doc of toDelete) {
+          delete next[doc.document_id];
+        }
+        return next;
+      });
+      await loadDocuments();
+      setTimelineItems([]);
+      setTimelineState("idle");
+      setTimelineMessage("Bereit");
+      setTimelineDetails("Rohtext einfügen und Termine extrahieren.");
+      addToast("success", "Alle Dokumente gelöscht", `${toDelete.length} Dokument(e) entfernt.`);
+    } catch (e) {
+      addToast("error", "Massen-Löschen fehlgeschlagen", normalizeApiError(e));
+    } finally {
+      setDocumentActionsPending(false);
+    }
   };
 
   const onReprocessDocument = async (doc: DocumentItem) => {
+    if (!activePropertyId) {
+      addToast("error", "Neuverarbeitung fehlgeschlagen", "Keine Property ausgewählt.");
+      return;
+    }
     setDocumentActionsPending(true);
     setDocumentStatuses((prev) => ({ ...prev, [doc.document_id]: "processing" }));
     try {
-      await apiCall<{
+      await apiFetch<{
         items: TimelineItem[];
         documents_considered: number;
         documents_processed: number;
@@ -457,7 +855,7 @@ export default function App() {
       }>(`${apiBase}/timeline/extract-documents`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ document_ids: [doc.document_id] }),
+        body: JSON.stringify({ property_id: activePropertyId, document_ids: [doc.document_id] }),
         timeoutMs: 60000
       });
       setDocumentStatuses((prev) => ({ ...prev, [doc.document_id]: "indexed" }));
@@ -474,12 +872,12 @@ export default function App() {
 
   const filteredTimeline = useMemo(() => {
     const sorted = [...timelineItems].sort((a, b) => {
-      const da = new Date(a.date_iso).getTime();
-      const db = new Date(b.date_iso).getTime();
-      if (da !== db) return da - db;
       const pa = timelinePriority(a.category || "info");
       const pb = timelinePriority(b.category || "info");
       if (pa !== pb) return pa - pb;
+      const da = new Date(a.date_iso).getTime();
+      const db = new Date(b.date_iso).getTime();
+      if (da !== db) return da - db;
       return (a.time_24h || "99:99").localeCompare(b.time_24h || "99:99");
     });
 
@@ -551,18 +949,17 @@ export default function App() {
     [documents]
   );
 
-  const hasIndexedDocuments = useMemo(
-    () => documents.some((doc) => documentStatuses[doc.document_id] === "indexed"),
-    [documents, documentStatuses]
-  );
+  const hasDocuments = documents.length > 0;
 
+  const apiIndicator = apiState === "loading" ? "Prüfe Verbindung..." : apiState === "error" ? "Nicht erreichbar" : "Bereit";
+  const selectedProperty = properties.find((p) => p.id === activePropertyId) || null;
+  const canWork = Boolean(currentUser && activePropertyId);
   const activeWorkflowStep = useMemo(() => {
+    if (!canWork) return 1;
     if (uploadPending) return 2;
     if (documents.length > 0) return 3;
     return 1;
-  }, [uploadPending, documents.length]);
-
-  const apiIndicator = apiState === "loading" ? "Prüfe Verbindung..." : apiState === "error" ? "Nicht erreichbar" : "Bereit";
+  }, [canWork, uploadPending, documents.length]);
 
   return (
     <>
@@ -570,117 +967,238 @@ export default function App() {
       <div className="bg-orb orb-b" />
 
       <main className="shell">
-        <section className="layout-top reveal">
-          <header className="hero hero-compact">
-            <div className="hero-topline">
-              <p className="eyebrow">Property AI</p>
-              <span className={`api-indicator ${apiState === "error" ? "is-offline" : apiState === "loading" ? "is-loading" : "is-ready"}`}>
-                {apiIndicator}
-              </span>
+        {showColdStartBanner ? (
+          <section className="coldstart-banner" role="status" aria-live="polite">
+            <div className="coldstart-banner-text">
+              Der Server startet ggf. gerade (Free Hosting). Bitte versuche es in 10–20 Sekunden erneut.
             </div>
-            <h1>Dokumente verstehen. Fragen stellen. Fristen sehen.</h1>
-            <p className="sub">Upload links, Timeline rechts, Chat unten.</p>
-          </header>
-          {isLocalDev ? (
-            <details className="dev-details">
-              <summary>Entwickler-Details</summary>
-              <div className="dev-details-grid">
-                <label htmlFor="apiBase">Backend-URL</label>
-                <input id="apiBase" value={apiBase} onChange={(e) => setApiBase(e.target.value)} />
+            <button className="chip" onClick={() => void runHealth()} disabled={apiState === "loading"}>
+              Erneut versuchen
+            </button>
+          </section>
+        ) : null}
+        {!currentUser ? (
+          <section className="layout-top reveal">
+            <header className="hero hero-compact">
+              <div className="hero-topline">
+                <p className="eyebrow">Property AI</p>
+                <span className={`api-indicator ${apiState === "error" ? "is-offline" : apiState === "loading" ? "is-loading" : "is-ready"}`}>
+                  {apiIndicator}
+                </span>
+              </div>
+              <h1>Dokumente verstehen. Fragen stellen. Fristen sehen.</h1>
+              <p className="sub">Melde dich an, um deine Properties, Uploads, Timeline und Chat zu nutzen.</p>
+              <div className="col">
                 <div className="row wrap">
-                  <button className="btn" onClick={() => void runHealth()} disabled={apiState === "loading"}>
-                    Verbinden
+                  <input
+                    placeholder="E-Mail für Magic Link"
+                    value={authEmail}
+                    onChange={(e) => setAuthEmail(e.target.value)}
+                    disabled={authPending}
+                  />
+                  <button className="btn" onClick={() => void requestMagicLink()} disabled={authPending}>
+                    Link anfordern
                   </button>
                 </div>
-                <pre className="output">{apiOutput}</pre>
+                <div className="timeline-hint">
+                  Nach dem Login kannst du eine Immobilie anlegen und Dokumente hochladen.
+                </div>
+                {magicLink ? (
+                  <div className="row wrap">
+                    <code>{magicLink}</code>
+                    <button className="chip" onClick={() => void verifyMagicLink()} disabled={authPending}>
+                      DEV Link verifizieren
+                    </button>
+                  </div>
+                ) : null}
               </div>
-            </details>
-          ) : null}
-        </section>
+            </header>
+          </section>
+        ) : properties.length === 0 ? (
+          <section className="layout-top reveal">
+            <header className="hero hero-compact">
+              <div className="hero-topline">
+                <p className="eyebrow">Property AI</p>
+                <span className={`api-indicator ${apiState === "error" ? "is-offline" : apiState === "loading" ? "is-loading" : "is-ready"}`}>
+                  {apiIndicator}
+                </span>
+              </div>
+              <div className="row wrap">
+                <span>Eingeloggt als: <strong>{currentUser.email}</strong></span>
+                <button className="chip" onClick={() => void logout()} disabled={authPending}>
+                  Logout
+                </button>
+              </div>
+              <h1>Lege deine erste Immobilie an</h1>
+              <p className="sub">
+                Dokumente, Timeline und Chat sind immer an eine Immobilie gebunden. Starte mit einem Namen für deine erste Immobilie.
+              </p>
+              <div className="row wrap">
+                <input
+                  placeholder="Name der Immobilie"
+                  value={newPropertyName}
+                  onChange={(e) => setNewPropertyName(e.target.value)}
+                  disabled={propertiesPending}
+                />
+                <button className="btn" onClick={() => void createProperty()} disabled={propertiesPending}>
+                  Immobilie anlegen
+                </button>
+              </div>
+            </header>
+          </section>
+        ) : (
+          <>
+            <section className="layout-top reveal">
+              <header className="hero hero-compact">
+                <div className="hero-topline">
+                  <p className="eyebrow">Property AI</p>
+                  <span className={`api-indicator ${apiState === "error" ? "is-offline" : apiState === "loading" ? "is-loading" : "is-ready"}`}>
+                    {apiIndicator}
+                  </span>
+                </div>
+                <h1>Dokumente verstehen. Fragen stellen. Fristen sehen.</h1>
+                <p className="sub">Upload links, Timeline rechts, Chat unten.</p>
+                <div className="col">
+                  <div className="row wrap">
+                    <span>Eingeloggt als: <strong>{currentUser.email}</strong></span>
+                    <button className="chip" onClick={() => void logout()} disabled={authPending}>
+                      Logout
+                    </button>
+                  </div>
+                  <div className="row wrap">
+                    <select
+                      value={activePropertyId ?? ""}
+                      onChange={(e) => setActivePropertyId(e.target.value ? Number(e.target.value) : null)}
+                      disabled={propertiesPending}
+                    >
+                      <option value="">Property wählen...</option>
+                      {properties.map((p) => (
+                        <option key={p.id} value={p.id}>
+                          {p.name}
+                        </option>
+                      ))}
+                    </select>
+                    <input
+                      placeholder="Neue Property"
+                      value={newPropertyName}
+                      onChange={(e) => setNewPropertyName(e.target.value)}
+                      disabled={propertiesPending}
+                    />
+                    <button className="chip" onClick={() => void createProperty()} disabled={propertiesPending}>
+                      Property erstellen
+                    </button>
+                  </div>
+                  <div>Aktive Property: {selectedProperty ? `${selectedProperty.name} (#${selectedProperty.id})` : "keine"}</div>
+                </div>
+              </header>
+              {isLocalDev ? (
+                <details className="dev-details">
+                  <summary>Entwickler-Details</summary>
+                  <div className="dev-details-grid">
+                    <label htmlFor="apiBase">Backend-URL</label>
+                    <input id="apiBase" value={apiBase} onChange={(e) => setApiBase(e.target.value)} />
+                    <div className="row wrap">
+                      <button className="btn" onClick={() => void runHealth()} disabled={apiState === "loading"}>
+                        Verbinden
+                      </button>
+                    </div>
+                    <pre className="output">{apiOutput}</pre>
+                  </div>
+                </details>
+              ) : null}
+            </section>
 
-        <section className="workflow-stepper reveal" aria-label="Arbeitsfortschritt">
-          <div className={`workflow-step ${activeWorkflowStep === 1 ? "is-active" : ""}`}>
-            <span className="workflow-step-index">1</span>
-            <span className="workflow-step-label">PDF hochladen</span>
-          </div>
-          <div className={`workflow-step ${activeWorkflowStep === 2 ? "is-active" : ""}`}>
-            <span className="workflow-step-index">2</span>
-            <span className="workflow-step-label">Verarbeitet</span>
-          </div>
-          <div className={`workflow-step ${activeWorkflowStep === 3 ? "is-active" : ""}`}>
-            <span className="workflow-step-index">3</span>
-            <span className="workflow-step-label">Fristen & Fragen</span>
-          </div>
-        </section>
+            <section className="workflow-stepper reveal" aria-label="Arbeitsfortschritt">
+              <div className={`workflow-step ${activeWorkflowStep === 1 ? "is-active" : ""}`}>
+                <span className="workflow-step-index">1</span>
+                <span className="workflow-step-label">PDF hochladen</span>
+              </div>
+              <div className={`workflow-step ${activeWorkflowStep === 2 ? "is-active" : ""}`}>
+                <span className="workflow-step-index">2</span>
+                <span className="workflow-step-label">Verarbeitet</span>
+              </div>
+              <div className={`workflow-step ${activeWorkflowStep === 3 ? "is-active" : ""}`}>
+                <span className="workflow-step-index">3</span>
+                <span className="workflow-step-label">Fristen & Fragen</span>
+              </div>
+            </section>
 
-        <section className="layout-main">
-          <div className="layout-left">
-            <UploadCard
-              state={uploadState}
-              message={uploadMessage}
-              details={uploadDetails}
-              selectedFilesCount={selectedFiles.length}
-              uploadErrors={uploadErrors}
-              uploadPending={uploadPending}
-              progressVisible={progressVisible}
-              progressPercent={progressPercent}
-              progressText={progressText}
-              uploadOutput={uploadOutput}
-              documents={documents}
-              documentStatuses={documentStatuses}
-              onFiles={addFiles}
-              onUpload={() => void onUpload()}
-              onRetry={() => void onUpload()}
-              onDeleteDocument={(doc) => void onDeleteDocument(doc)}
-              onReprocessDocument={(doc) => void onReprocessDocument(doc)}
-              actionsPending={documentActionsPending}
-            />
-          </div>
+            <section className="layout-main">
+              <div className="layout-left">
+                <UploadCard
+                  disabled={!canWork}
+                  state={uploadState}
+                  message={uploadMessage}
+                  details={uploadDetails}
+                  selectedFilesCount={selectedFiles.length}
+                  uploadErrors={uploadErrors}
+                  uploadPending={uploadPending}
+                  progressVisible={progressVisible}
+                  progressPercent={progressPercent}
+                  progressText={progressText}
+                  uploadOutput={uploadOutput}
+                  documents={documents}
+                  documentStatuses={documentStatuses}
+                  onFiles={addFiles}
+                  onUpload={() => void onUpload()}
+                  onRetry={() => void onUpload()}
+                  onDeleteAllDocuments={() => void onDeleteAllDocuments()}
+                  onDeleteDocument={(doc) => void onDeleteDocument(doc)}
+                  onReprocessDocument={(doc) => void onReprocessDocument(doc)}
+                  actionsPending={documentActionsPending}
+                />
+              </div>
 
-          <div className="layout-right">
-            <TimelineCard
-              state={timelineState}
-              message={timelineMessage}
-              details={timelineDetails}
-              hasDocuments={documents.length > 0}
-              timelineItems={timelineItems}
-              timelineInput={timelineInput}
-              timelineSearch={timelineSearch}
-              timelineCategory={timelineCategory}
-              timelineCategories={timelineCategories}
-              timelineCurrentGrouped={timelineCurrentGrouped}
-              timelineArchiveGrouped={timelineArchiveGrouped}
-              pending={timelineState === "loading"}
-              onInputChange={setTimelineInput}
-              onExtract={() => void extractTimeline()}
-              onExtractDocuments={() => void loadTimelineFromStore(true)}
-              onRetry={() => void retryTimeline()}
-              onSearchChange={setTimelineSearch}
-              onCategoryChange={setTimelineCategory}
-              normalizeCategory={normalizeCategory}
-            />
-          </div>
-        </section>
+              <div className="layout-right">
+                <TimelineCard
+                  disabled={!canWork}
+                  state={timelineState}
+                  message={timelineMessage}
+                  details={timelineDetails}
+                  hasDocuments={documents.length > 0}
+                  timelineItems={timelineItems}
+                  timelineInput={timelineInput}
+                  timelineSearch={timelineSearch}
+                  timelineCategory={timelineCategory}
+                  timelineCategories={timelineCategories}
+                  timelineCurrentGrouped={timelineCurrentGrouped}
+                timelineArchiveGrouped={timelineArchiveGrouped}
+                animationSeed={timelineRenderSeed}
+                pending={timelineState === "loading"}
+                  onInputChange={setTimelineInput}
+                  onExtract={() => void extractTimeline()}
+                  onExtractDocuments={() => void rebuildTimeline()}
+                  onRetry={() => void retryTimeline()}
+                  onSearchChange={setTimelineSearch}
+                  onCategoryChange={setTimelineCategory}
+                  normalizeCategory={normalizeCategory}
+                />
+              </div>
+            </section>
 
-        <section className="layout-bottom">
-          <ChatCard
-            state={chatState}
-            message={chatMessage}
-            details={chatDetails}
-            chatHistory={chatHistory}
-            chatQuestion={chatQuestion}
-            chatPending={chatPending}
-            hasIndexedDocuments={hasIndexedDocuments}
-            exampleQuestions={EXAMPLE_QUESTIONS}
-            documentsById={documentsById}
-            onQuestionChange={setChatQuestion}
-            onAsk={() => void askChat(chatQuestion)}
-            onRetry={() => void retryChat()}
-            onUseExample={setChatQuestion}
-            onLoadSnippet={(messageId, source) => void loadSourceSnippet(messageId, source)}
-            historyRef={chatHistoryRef}
-          />
-        </section>
+            <section className="layout-bottom">
+              <ChatCard
+                disabled={!canWork}
+                state={chatState}
+                message={chatMessage}
+                details={chatDetails}
+                chatHistory={chatHistory}
+                chatQuestion={chatQuestion}
+                chatPending={chatPending}
+                hasDocuments={hasDocuments}
+                exampleQuestions={EXAMPLE_QUESTIONS}
+                documentsById={documentsById}
+                onQuestionChange={setChatQuestion}
+                onQuestionKeyDown={onChatQuestionKeyDown}
+                onAsk={() => void askChat(chatQuestion)}
+                onRetry={() => void retryChat()}
+                onUseExample={setChatQuestion}
+                onLoadSnippet={(messageId, source) => void loadSourceSnippet(messageId, source)}
+                historyRef={chatHistoryRef}
+              />
+            </section>
+          </>
+        )}
       </main>
 
       <ToastContainer toasts={toasts} />

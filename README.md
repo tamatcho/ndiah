@@ -2,14 +2,14 @@
 
 FastAPI backend for:
 - PDF upload and chunking
-- Vector indexing/search with FAISS
+- Vector retrieval with DB-backed embeddings
 - Context-grounded chat
 - Timeline extraction from raw text
 
 ## Project Structure
 
 - `backend/app`: API, ingestion, RAG, timeline extraction
-- `backend/storage`: local runtime data (`uploads`, FAISS files, sqlite db)
+- `backend/storage`: optional local data for development only
 - `frontend`: React (Vite + TypeScript) UI (upload, chat, timeline, status)
 
 ## Prerequisites
@@ -28,6 +28,11 @@ cp .env.example .env
 ```
 
 Set `OPENAI_API_KEY` in `backend/.env`.
+Set `DATABASE_URL` in `backend/.env` for hosted Postgres, for example:
+
+```bash
+DATABASE_URL=postgresql+psycopg://user:password@host:5432/dbname
+```
 
 ## Run API
 
@@ -73,8 +78,8 @@ This setup is free to start and easy to upgrade later.
 
 Notes:
 - Render free web services can sleep after inactivity, so first request may take ~30-60s.
-- Current storage (`backend/storage`) is local filesystem-based. On free hosting this is typically ephemeral (not guaranteed persistent after restart/redeploy).
-- For production persistence later, move uploads/index metadata to managed storage (e.g. S3 + DB).
+- Render Free filesystem is ephemeral (not persistent across restarts/redeploys), and free services spin down on idle.
+- This app stores required runtime state in the hosted database (documents/chunks/timeline/auth/properties), so it does not depend on local filesystem persistence.
 
 ## API Usage
 
@@ -82,6 +87,7 @@ Upload PDF:
 
 ```bash
 curl -X POST "http://localhost:8000/documents/upload" \
+  -F "property_id=1" \
   -F "file=@/absolute/path/to/file.pdf"
 ```
 
@@ -89,15 +95,16 @@ Upload ZIP (with multiple PDFs):
 
 ```bash
 curl -X POST "http://localhost:8000/documents/upload" \
+  -F "property_id=1" \
   -F "file=@/absolute/path/to/files.zip"
 ```
 
-Ask a question (uses FAISS context):
+Ask a question (uses DB-stored chunk embeddings):
 
 ```bash
 curl -X POST "http://localhost:8000/chat" \
   -H "Content-Type: application/json" \
-  -d '{"question":"Welche Zahlungen sind 2026 fällig?"}'
+  -d '{"question":"Welche Zahlungen sind 2026 fällig?", "property_id": 1}'
 ```
 
 Extract timeline from raw text:
@@ -106,6 +113,12 @@ Extract timeline from raw text:
 curl -X POST "http://localhost:8000/timeline/extract" \
   -H "Content-Type: application/json" \
   -d '{"raw_text":"..."}'
+```
+
+List timeline items for a property:
+
+```bash
+curl "http://localhost:8000/timeline?property_id=1"
 ```
 
 Index/document status:
@@ -118,7 +131,9 @@ curl "http://localhost:8000/documents/status"
 
 - API startup fails fast if `OPENAI_API_KEY` is missing.
 - Upload accepts single PDF files and ZIP archives containing PDFs.
-- SQLite stores document metadata; FAISS stores vector index + retrieval metadata.
+- `DATABASE_URL` should point to Postgres in hosted environments.
+- On startup, the app runs `Base.metadata.create_all()` for MVP schema creation.
+- For production schema evolution, use migrations (e.g., Alembic).
 
 ## Tests
 
@@ -128,7 +143,7 @@ source .venv/bin/activate
 pytest -q tests
 ```
 
-## Bulk Ingest Existing Uploads
+## Bulk Ingest Existing Uploads (Optional)
 
 If you manually copied PDFs into `backend/storage/uploads`, ingest and index all missing files with:
 
@@ -138,16 +153,16 @@ source .venv/bin/activate
 python scripts/bulk_ingest_uploads.py
 ```
 
-Full FAISS rebuild from all PDFs in `UPLOAD_DIR`:
+Recompute chunk embeddings from all PDFs in `UPLOAD_DIR`:
 
 ```bash
 cd backend
 source .venv/bin/activate
-python scripts/bulk_ingest_uploads.py --reindex
+python scripts/bulk_ingest_uploads.py --property-id 1 --reindex
 ```
 
 Behavior:
 - Reads all `.pdf` files in `UPLOAD_DIR`
 - Skips files already present in the `documents` table (by file path)
-- Creates DB rows and FAISS chunks for new files
-- With `--reindex`, clears FAISS files first and re-indexes all PDFs
+- Creates DB rows and chunk embeddings for new files
+- With `--reindex`, recomputes chunk embeddings for all PDFs

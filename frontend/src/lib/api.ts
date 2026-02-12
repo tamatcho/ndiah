@@ -12,7 +12,7 @@ export class ApiError extends Error {
   }
 }
 
-type ApiCallOptions = RequestInit & {
+type ApiFetchOptions = RequestInit & {
   timeoutMs?: number;
 };
 
@@ -26,13 +26,37 @@ function parseResponse(raw: string) {
 }
 
 export function normalizeApiError(error: unknown, fallback = "Unbekannter Fehler") {
-  if (error instanceof ApiError) return error.message || fallback;
+  if (error instanceof ApiError) {
+    const rawMsg = error.message || fallback;
+    const msg = /traceback|stack|exception|sqlalchemy|operationalerror/i.test(rawMsg)
+      ? fallback
+      : rawMsg;
+    if (error.isTimeout) {
+      return "Zeitüberschreitung. Bitte erneut versuchen.";
+    }
+    if (error.status === 401) {
+      return "Sitzung abgelaufen. Bitte erneut einloggen.";
+    }
+    if (error.status === 413) {
+      return msg || "Datei zu groß. Bitte eine kleinere PDF-Datei hochladen.";
+    }
+    if (error.status === 429) {
+      return msg || "Limit erreicht. Bitte reduziere die Anzahl der Dokumente.";
+    }
+    if (!error.status) {
+      return "Netzwerkfehler. Bitte Verbindung prüfen und erneut versuchen.";
+    }
+    if (msg.includes("Freikontingent erreicht")) {
+      return msg;
+    }
+    return msg;
+  }
   if (error instanceof Error) return error.message || fallback;
   return fallback;
 }
 
-export async function apiCall<T>(url: string, options: ApiCallOptions = {}): Promise<{ data: T; latencyMs: number; status: number }> {
-  const { timeoutMs = 15000, ...requestOptions } = options;
+export async function apiFetch<T>(url: string, options: ApiFetchOptions = {}): Promise<{ data: T; latencyMs: number; status: number }> {
+  const { timeoutMs = 30000, ...requestOptions } = options;
   const controller = new AbortController();
   const timer = window.setTimeout(() => controller.abort(), timeoutMs);
   const startedAt = performance.now();
@@ -40,6 +64,7 @@ export async function apiCall<T>(url: string, options: ApiCallOptions = {}): Pro
   try {
     const resp = await fetch(url, {
       ...requestOptions,
+      credentials: requestOptions.credentials ?? "include",
       signal: requestOptions.signal || controller.signal
     });
     const raw = await resp.text();
@@ -47,7 +72,7 @@ export async function apiCall<T>(url: string, options: ApiCallOptions = {}): Pro
     const latencyMs = Math.max(1, Math.round(performance.now() - startedAt));
 
     if (!resp.ok) {
-      throw new ApiError(body.detail || body.error || body.raw || `HTTP ${resp.status}`, {
+      throw new ApiError(body.message || body.detail || body.error || body.raw || `HTTP ${resp.status}`, {
         status: resp.status,
         latencyMs
       });
@@ -70,19 +95,25 @@ export async function apiCall<T>(url: string, options: ApiCallOptions = {}): Pro
   }
 }
 
+export async function apiCall<T>(url: string, options: ApiFetchOptions = {}): Promise<{ data: T; latencyMs: number; status: number }> {
+  return apiFetch<T>(url, options);
+}
+
 export async function fetchJson<T>(url: string, options: RequestInit = {}): Promise<T> {
-  const { data } = await apiCall<T>(url, options);
+  const { data } = await apiFetch<T>(url, options);
   return data;
 }
 
 export function uploadWithProgress(
   baseUrl: string,
+  propertyId: number,
   file: File,
   onProgress: (loaded: number, total: number) => void
 ) {
   return new Promise<any>((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open("POST", `${baseUrl}/documents/upload`);
+    xhr.withCredentials = true;
     xhr.timeout = 180000;
 
     xhr.upload.onprogress = (event) => {
@@ -100,13 +131,14 @@ export function uploadWithProgress(
         // ignore
       }
       if (xhr.status < 200 || xhr.status >= 300) {
-        reject(new ApiError(data.detail || `HTTP ${xhr.status}`, { status: xhr.status }));
+        reject(new ApiError(data.message || data.detail || `HTTP ${xhr.status}`, { status: xhr.status }));
         return;
       }
       resolve(data);
     };
 
     const form = new FormData();
+    form.append("property_id", String(propertyId));
     form.append("file", file);
     xhr.send(form);
   });
