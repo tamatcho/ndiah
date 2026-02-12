@@ -2,15 +2,21 @@ import json
 from dataclasses import dataclass
 from functools import lru_cache
 
-import firebase_admin
-from firebase_admin import auth as firebase_auth
-from firebase_admin import credentials
 from fastapi import Depends, Header, HTTPException
 from sqlalchemy.orm import Session
 
 from .config import settings
 from .db import get_db
 from .models import User
+
+try:
+    import firebase_admin
+    from firebase_admin import auth as firebase_auth
+    from firebase_admin import credentials
+except ModuleNotFoundError:  # pragma: no cover - depends on runtime env
+    firebase_admin = None
+    firebase_auth = None
+    credentials = None
 
 
 @dataclass
@@ -24,7 +30,15 @@ def _uid_storage_key(uid: str) -> str:
     return f"firebase_uid:{uid}"
 
 
-def _build_firebase_credential() -> credentials.Base:
+def _ensure_firebase_sdk() -> None:
+    if firebase_admin is None or firebase_auth is None or credentials is None:
+        raise RuntimeError(
+            "Firebase Admin SDK is not installed. Install dependency 'firebase-admin'."
+        )
+
+
+def _build_firebase_credential() -> object:
+    _ensure_firebase_sdk()
     raw_json = (settings.FIREBASE_SERVICE_ACCOUNT_JSON or "").strip()
     file_path = (settings.FIREBASE_SERVICE_ACCOUNT_FILE or "").strip()
 
@@ -44,7 +58,8 @@ def _build_firebase_credential() -> credentials.Base:
 
 
 @lru_cache(maxsize=1)
-def _firebase_app() -> firebase_admin.App:
+def _firebase_app() -> object:
+    _ensure_firebase_sdk()
     if firebase_admin._apps:
         return firebase_admin.get_app()
 
@@ -72,6 +87,8 @@ def get_current_user_context(
     try:
         _firebase_app()
         decoded = firebase_auth.verify_id_token(token)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
     except Exception:
         raise HTTPException(status_code=401, detail="Invalid or expired Firebase token")
 

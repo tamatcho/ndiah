@@ -13,6 +13,7 @@ import {
   signOut,
   type User
 } from "firebase/auth";
+import { FirebaseError } from "firebase/app";
 import { AuthUser, ChatMessage, DocumentItem, DocumentStatus, PropertyItem, Source, TimelineItem, Toast, UiState } from "./types";
 
 const BASE_KEY = "ndiah_base_url";
@@ -42,6 +43,29 @@ function timelinePriority(category: string) {
   if (normalized === "meeting") return 2;
   if (normalized === "info") return 3;
   return 4;
+}
+
+function normalizeFirebaseAuthError(error: unknown) {
+  if (!(error instanceof FirebaseError)) {
+    return normalizeApiError(error);
+  }
+
+  switch (error.code) {
+    case "auth/email-already-in-use":
+      return "Diese E-Mail ist bereits registriert. Bitte anmelden.";
+    case "auth/invalid-email":
+      return "Ungültige E-Mail-Adresse.";
+    case "auth/weak-password":
+      return "Passwort zu schwach. Bitte mindestens 6 Zeichen verwenden.";
+    case "auth/operation-not-allowed":
+      return "E-Mail/Passwort-Anmeldung ist in Firebase Authentication nicht aktiviert.";
+    case "auth/invalid-api-key":
+      return "Firebase API-Key ist ungültig. Bitte VITE_FIREBASE_API_KEY prüfen.";
+    case "auth/network-request-failed":
+      return "Netzwerkfehler bei Firebase. Bitte Verbindung prüfen.";
+    default:
+      return error.message || "Firebase-Authentifizierung fehlgeschlagen.";
+  }
 }
 
 export default function App() {
@@ -181,6 +205,26 @@ export default function App() {
     }
   };
 
+  const syncBackendSessionAfterFirebaseAuth = async (firebaseEmail?: string | null) => {
+    try {
+      const { data } = await apiFetch<AuthUser>(`${apiBase}/auth/me`);
+      setCurrentUser(data);
+      await loadProperties();
+      return data;
+    } catch (e) {
+      setCurrentUser(null);
+      if (firebaseEmail) {
+        addToast("success", "Firebase Auth erfolgreich", firebaseEmail);
+      }
+      addToast(
+        "error",
+        "Backend-Session fehlgeschlagen",
+        `Token konnte nicht im Backend verifiziert werden. Render/Firebase-Admin prüfen (FIREBASE_SERVICE_ACCOUNT_JSON, gleiches Projekt). ${normalizeApiError(e)}`
+      );
+      return null;
+    }
+  };
+
   const loadProperties = async () => {
     try {
       const { data } = await apiFetch<PropertyItem[]>(`${apiBase}/properties`);
@@ -215,13 +259,12 @@ export default function App() {
       const token = await creds.user.getIdToken();
       setFirebaseIdToken(token);
 
-      const me = await loadMe();
+      const me = await syncBackendSessionAfterFirebaseAuth(creds.user.email);
       if (me) {
         addToast("success", "Eingeloggt", me.email);
-        await loadProperties();
       }
     } catch (e) {
-      addToast("error", "Anmeldung fehlgeschlagen", normalizeApiError(e));
+      addToast("error", "Anmeldung fehlgeschlagen", normalizeFirebaseAuthError(e));
     } finally {
       setAuthPending(false);
     }
@@ -244,13 +287,12 @@ export default function App() {
       const token = await creds.user.getIdToken();
       setFirebaseIdToken(token);
 
-      const me = await loadMe();
+      const me = await syncBackendSessionAfterFirebaseAuth(creds.user.email);
       if (me) {
         addToast("success", "Registrierung erfolgreich", me.email);
-        await loadProperties();
       }
     } catch (e) {
-      addToast("error", "Registrierung fehlgeschlagen", normalizeApiError(e));
+      addToast("error", "Registrierung fehlgeschlagen", normalizeFirebaseAuthError(e));
     } finally {
       setAuthPending(false);
     }

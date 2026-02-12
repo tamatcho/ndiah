@@ -17,8 +17,14 @@ const requiredConfig = [
   "VITE_FIREBASE_APP_ID",
 ] as const;
 
+function isMissingConfigValue(value: unknown) {
+  if (typeof value !== "string") return true;
+  const normalized = value.trim().toLowerCase();
+  return !normalized || normalized === "undefined" || normalized === "null";
+}
+
 for (const key of requiredConfig) {
-  if (!import.meta.env[key]) {
+  if (isMissingConfigValue(import.meta.env[key])) {
     throw new Error(`Missing Firebase config: ${key}`);
   }
 }
