@@ -1,12 +1,25 @@
 import json
 import numpy as np
 from openai import OpenAI
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from .config import settings
 from .models import Chunk, Document, Property
 
 client = OpenAI(api_key=settings.OPENAI_API_KEY)
+
+
+class ChatSource(BaseModel):
+    document_id: int
+    chunk_id: str
+
+
+class ChatAnswer(BaseModel):
+    answer: str
+    key_points: list[str]
+    sources: list[ChatSource]
+    missing_info: list[str]
 
 
 def embed_texts(texts: list[str]) -> np.ndarray:
@@ -97,26 +110,53 @@ def search(query: str, db: Session, user_id: int, property_id: int | None = None
     return [{**candidates[i], "score": float(scores[i])} for i in best_idx]
 
 
-def answer_with_context(question: str, contexts: list[dict]) -> str:
+def answer_with_context(question: str, contexts: list[dict]) -> dict:
+    if not contexts:
+        return {
+            "answer": "Im bereitgestellten Kontext wurden keine passenden Informationen gefunden.",
+            "key_points": [],
+            "sources": [],
+            "missing_info": [f"Keine relevanten Kontextstellen zur Frage vorhanden: {question}"],
+        }
+
     context_text = "\n\n".join(
         [f"[DOC {c['document_id']} | {c['chunk_id']}]\n{c['text']}" for c in contexts]
     )
-    prompt = (
-        "Du bist ein deutschsprachiger Assistent für Wohnungseigentümer.\n"
-        "Nutze NUR den Kontext aus den Dokumenten. Wenn etwas nicht im Kontext steht, sag es ehrlich.\n"
-        "Antworte klar, mit konkreten Zahlen/Terminen, und erkläre Fachbegriffe einfach.\n\n"
-        f"KONTEXT:\n{context_text}\n\nFRAGE:\n{question}"
+    allowed_sources = {(int(c["document_id"]), str(c["chunk_id"])) for c in contexts}
+    system_prompt = (
+        "Du bist ein deutschsprachiger Assistent für Wohnungseigentümer. Nutze AUSSCHLIESSLICH den bereitgestellten Kontext.\n"
+        "Wenn eine Information im Kontext nicht vorkommt, schreibe sie unter missing_info und rate nicht.\n"
+        "Antworte knapp, konkret und verständlich. Zahlen/Termine nur nennen, wenn sie im Kontext stehen.\n"
+        "Gib ausschließlich JSON im Format zurück:\n"
+        "{\"answer\":\"...\",\"key_points\":[\"...\"],\"sources\":[{\"document_id\":number,\"chunk_id\":\"...\"}],\"missing_info\":[\"...\"]}\n"
+        "Die sources sollen die DOC/Chunk Labels referenzieren, die im Kontext stehen."
     )
 
     try:
         resp = client.chat.completions.create(
             model=settings.OPENAI_MODEL,
             messages=[
-                {"role": "system", "content": "Antworte auf Deutsch."},
-                {"role": "user", "content": prompt},
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": f"KONTEXT:\n{context_text}\n\nFRAGE:\n{question}"},
             ],
+            response_format={"type": "json_object"},
         )
     except Exception as e:
         raise RuntimeError("Chat completion request to OpenAI failed") from e
-    text = (resp.choices[0].message.content or "").strip()
-    return text
+    try:
+        content = (resp.choices[0].message.content or "").strip()
+        data = json.loads(content)
+        result = ChatAnswer.model_validate(data)
+        filtered_sources = [
+            source
+            for source in result.sources
+            if (int(source.document_id), str(source.chunk_id)) in allowed_sources
+        ]
+        return {
+            "answer": result.answer,
+            "key_points": result.key_points,
+            "sources": [source.model_dump() for source in filtered_sources],
+            "missing_info": result.missing_info,
+        }
+    except Exception as e:
+        raise RuntimeError("Chat completion response parsing failed") from e

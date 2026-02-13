@@ -27,16 +27,10 @@ def chat(
 
     try:
         contexts = search(question, db=db, user_id=current_user.id, property_id=req.property_id, k=6)
-        answer = answer_with_context(question, contexts)
+        answer_json = answer_with_context(question, contexts)
     except RuntimeError as e:
         raise HTTPException(status_code=502, detail=str(e))
     except Exception:
         raise HTTPException(status_code=500, detail="Chat request failed")
 
-    return {
-        "answer": answer,
-        "sources": [
-            {"document_id": c["document_id"], "chunk_id": c["chunk_id"], "score": c["score"]}
-            for c in contexts
-        ],
-    }
+    return answer_json
