@@ -1,5 +1,5 @@
 import json
-import numpy as np
+import math
 from openai import OpenAI
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -27,15 +27,14 @@ class TimelineTextTranslation(BaseModel):
     description: str
 
 
-def embed_texts(texts: list[str]) -> np.ndarray:
+def embed_texts(texts: list[str]) -> list[list[float]]:
     if not texts:
-        return np.empty((0, 0), dtype="float32")
+        return []
     try:
         resp = client.embeddings.create(model=settings.EMBED_MODEL, input=texts)
     except Exception as e:
         raise RuntimeError("Embedding request to OpenAI failed") from e
-    vecs = [d.embedding for d in resp.data]
-    return np.array(vecs, dtype="float32")
+    return [list(d.embedding) for d in resp.data]
 
 
 def upsert_chunks(db: Session, chunks: list[dict]):
@@ -55,24 +54,31 @@ def upsert_chunks(db: Session, chunks: list[dict]):
                 document_id=chunk["document_id"],
                 chunk_id=chunk["chunk_id"],
                 text=chunk["text"],
-                embedding_json=json.dumps(vec.tolist(), ensure_ascii=False),
+                embedding_json=json.dumps(vec, ensure_ascii=False),
             )
         )
 
 
-def _cosine_similarity(query_vec: np.ndarray, embeddings: np.ndarray) -> np.ndarray:
-    q_norm = np.linalg.norm(query_vec)
+def _cosine_similarity(query_vec: list[float], embeddings: list[list[float]]) -> list[float]:
+    q_norm = math.sqrt(sum(v * v for v in query_vec))
     if q_norm == 0:
-        return np.zeros((embeddings.shape[0],), dtype=np.float32)
-    emb_norms = np.linalg.norm(embeddings, axis=1)
-    denom = emb_norms * q_norm
-    denom[denom == 0] = 1e-12
-    return (embeddings @ query_vec) / denom
+        return [0.0 for _ in embeddings]
+
+    scores: list[float] = []
+    for emb in embeddings:
+        emb_norm = math.sqrt(sum(v * v for v in emb))
+        denom = emb_norm * q_norm
+        if denom == 0:
+            scores.append(0.0)
+            continue
+        dot = sum(e * q for e, q in zip(emb, query_vec))
+        scores.append(dot / denom)
+    return scores
 
 
 def search(query: str, db: Session, user_id: int, property_id: int | None = None, k: int = 6) -> list[dict]:
     qv = embed_texts([query])
-    if qv.size == 0:
+    if not qv:
         return []
     query_vec = qv[0]
 
@@ -108,10 +114,9 @@ def search(query: str, db: Session, user_id: int, property_id: int | None = None
     if not candidates:
         return []
 
-    emb_matrix = np.array(vectors, dtype=np.float32)
-    scores = _cosine_similarity(query_vec, emb_matrix)
+    scores = _cosine_similarity(query_vec, vectors)
     top_k = max(1, k)
-    best_idx = np.argsort(scores)[::-1][:top_k]
+    best_idx = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[:top_k]
     return [{**candidates[i], "score": float(scores[i])} for i in best_idx]
 
 
