@@ -1,4 +1,5 @@
 import json
+import re
 from datetime import datetime
 from openai import OpenAI
 from pydantic import BaseModel, Field, field_validator
@@ -34,6 +35,34 @@ class TimelineItem(BaseModel):
 
 class TimelineExtraction(BaseModel):
     items: List[TimelineItem]
+
+
+def _extract_json_payload(content: str) -> dict:
+    normalized = (content or "").strip()
+    if not normalized:
+        raise ValueError("empty_response")
+
+    # Some models still wrap JSON in markdown fences despite json_object mode.
+    if normalized.startswith("```"):
+        normalized = re.sub(r"^```[a-zA-Z0-9_-]*\s*", "", normalized)
+        normalized = re.sub(r"\s*```$", "", normalized)
+
+    data = json.loads(normalized)
+    if isinstance(data, list):
+        return {"items": data}
+    if not isinstance(data, dict):
+        raise ValueError("invalid_json_root")
+
+    items = data.get("items")
+    if isinstance(items, list):
+        return {"items": items}
+
+    for alias in ("timeline", "events", "entries", "results"):
+        alias_items = data.get(alias)
+        if isinstance(alias_items, list):
+            return {"items": alias_items}
+
+    raise ValueError("missing_items_array")
 
 
 def extract_timeline(document_text: str) -> TimelineExtraction:
@@ -83,8 +112,14 @@ Ausgabeformat:
 
     try:
         content = (resp.choices[0].message.content or "").strip()
-        data = json.loads(content)
-        result = TimelineExtraction.model_validate(data)
+        data = _extract_json_payload(content)
+        valid_items: List[TimelineItem] = []
+        for raw_item in data.get("items", []):
+            try:
+                valid_items.append(TimelineItem.model_validate(raw_item))
+            except Exception:
+                continue
+        result = TimelineExtraction(items=valid_items)
     except Exception as e:
         raise RuntimeError("Timeline extraction response parsing failed") from e
 

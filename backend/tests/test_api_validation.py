@@ -567,6 +567,34 @@ def test_timeline_rebuild_returns_items_count_and_updated_at(auth_db, monkeypatc
     res = timeline_rebuild(property_id=property_obj.id, db=auth_db, current_user=user)
     assert res["items_count"] == 3
     assert isinstance(res["updated_at"], str) and "T" in res["updated_at"]
+    assert res["documents_considered"] == 2
+    assert res["documents_processed"] == 2
+    assert res["documents_failed"] == []
+
+
+def test_timeline_rebuild_continues_when_single_document_extraction_fails(auth_db, monkeypatch):
+    user = _seed_user(auth_db, "rebuild-partial@example.com")
+    property_obj = _seed_property(auth_db, user.id, "RebuildPartial")
+    doc1 = Document(property_id=property_obj.id, filename="a.pdf", path=None, extracted_text="x")
+    doc2 = Document(property_id=property_obj.id, filename="b.pdf", path=None, extracted_text="y")
+    auth_db.add_all([doc1, doc2])
+    auth_db.commit()
+    auth_db.refresh(doc1)
+    auth_db.refresh(doc2)
+
+    def fake_extract_and_store(_db, doc, raw_text=None):
+        if doc.id == doc1.id:
+            return [{"title": "A"}, {"title": "B"}]
+        raise RuntimeError("Timeline extraction response parsing failed")
+
+    monkeypatch.setattr("app.routes.timeline.extract_and_store_timeline_for_document", fake_extract_and_store)
+    res = timeline_rebuild(property_id=property_obj.id, db=auth_db, current_user=user)
+    assert res["items_count"] == 2
+    assert res["documents_considered"] == 2
+    assert res["documents_processed"] == 1
+    assert len(res["documents_failed"]) == 1
+    assert res["documents_failed"][0]["document_id"] == doc2.id
+    assert res["documents_failed"][0]["reason"] == "document_timeline_extraction_failed"
 
 
 def test_delete_document_removes_document_chunks_and_timeline(auth_db):

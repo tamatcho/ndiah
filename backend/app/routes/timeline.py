@@ -186,7 +186,7 @@ def timeline_extract_documents(
                     for item in items
                 ]
             )
-        except RuntimeError as e:
+        except RuntimeError:
             failed_documents.append({"document_id": doc.id, "filename": doc.filename, "reason": str(e)})
         except Exception:
             failed_documents.append(
@@ -225,16 +225,34 @@ def timeline_rebuild(
         raise HTTPException(status_code=400, detail="No documents available for timeline rebuild")
 
     items_count = 0
+    processed_documents = 0
+    failed_documents: list[dict] = []
     for doc in docs:
         try:
             items = extract_and_store_timeline_for_document(db, doc)
             items_count += len(items)
-        except RuntimeError as e:
+            processed_documents += 1
+        except RuntimeError:
             db.rollback()
-            raise HTTPException(status_code=502, detail=str(e))
+            failed_documents.append(
+                {
+                    "document_id": doc.id,
+                    "filename": doc.filename,
+                    "reason": "document_timeline_extraction_failed",
+                }
+            )
         except Exception:
             db.rollback()
-            raise HTTPException(status_code=500, detail="Timeline rebuild failed")
+            failed_documents.append(
+                {
+                    "document_id": doc.id,
+                    "filename": doc.filename,
+                    "reason": "document_timeline_rebuild_failed",
+                }
+            )
+
+    if processed_documents == 0 and failed_documents:
+        raise HTTPException(status_code=502, detail="Timeline extraction failed for all selected documents")
 
     try:
         db.commit()
@@ -245,4 +263,7 @@ def timeline_rebuild(
     return {
         "items_count": items_count,
         "updated_at": datetime.now(timezone.utc).isoformat(),
+        "documents_considered": len(docs),
+        "documents_processed": processed_documents,
+        "documents_failed": failed_documents,
     }
