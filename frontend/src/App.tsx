@@ -23,6 +23,8 @@ const AUTH_TOKEN_KEY = "ndiah_firebase_id_token";
 const LANGUAGE_KEY = "ndiah_language";
 const DEFAULT_API_BASE = (import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8000").replace(/\/+$/, "");
 const MAX_FILE_SIZE = 20 * 1024 * 1024;
+const TIMELINE_REBUILD_TIMEOUT_MS = 180000;
+const TIMELINE_REPROCESS_TIMEOUT_MS = 120000;
 const EXAMPLE_QUESTIONS = [
   "Welche Zahlungen sind 2026 fällig?",
   "Wann ist die nächste Eigentümerversammlung?",
@@ -899,12 +901,13 @@ export default function App() {
     setLastTimelineAction("load");
     setTimelineState("loading");
     setTimelineMessage("Timeline wird aktualisiert...");
+    setTimelineDetails("Kann bei vielen Dokumenten bis zu 3 Minuten dauern.");
     try {
       const { data } = await apiFetch<{ items_count: number; updated_at: string }>(
         `${apiBase}/timeline/rebuild?property_id=${encodeURIComponent(activePropertyId)}`,
         {
           method: "POST",
-          timeoutMs: 60000
+          timeoutMs: TIMELINE_REBUILD_TIMEOUT_MS
         }
       );
       const { data: list } = await apiFetch<TimelineItem[]>(
@@ -1036,7 +1039,7 @@ export default function App() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ property_id: activePropertyId, document_ids: [doc.document_id] }),
-        timeoutMs: 60000
+        timeoutMs: TIMELINE_REPROCESS_TIMEOUT_MS
       });
       setDocumentStatuses((prev) => ({ ...prev, [doc.document_id]: "indexed" }));
       addToast("success", "Neu verarbeitet", `${doc.filename} ist wieder indexiert.`);
