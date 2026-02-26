@@ -115,24 +115,32 @@ Regeln:
 1) NUR Einträge mit präzisem Datum (YYYY-MM-DD). Wenn kein exaktes Datum, NICHT aufnehmen.
 2) Priorisiere: deadline > payment > meeting > info. Nimm pro Dokument maximal 25 Items.
 3) Schreibe title kurz (max 80 Zeichen). description 1–2 Sätze, klar und laienverständlich.
-4) Beträge:
+4) Nutze TABELLEN explizit:
+   - Wenn ein Abschnitt "TABLES:" vorhanden ist, nutze ihn aktiv für Beträge, Fristen und Bezeichnungen.
+   - Gleiche Informationen aus Fließtext und TABLES ab; bevorzuge die präzisere/konkretere Tabellenzeile.
+5) Beträge:
    - amount_eur nur setzen, wenn ein konkreter Eurobetrag im Text steht, sonst null.
    - Verwende Punkt als Dezimaltrennzeichen (z.B. 219.29).
-5) Datum:
+   - Verknüpfe jeden Betrag immer mit seinem Zeilenlabel/Kontext (z.B. "Nachzahlung", "Hausgeld", "Abrechnungsspitze", "Rücklage").
+   - Nenne in title/description nie einen isolierten Betrag ohne zugehörige Position.
+6) Summen/Totalen:
+   - Behandle "Summe", "Gesamtsumme", "Total", "Zwischensumme" NICHT als eigene Zahlung,
+     außer der Text beschreibt diese Summe explizit als fällige Zahlung (z.B. "fällig", "zu zahlen bis", "zahlbar bis", "bitte überweisen").
+7) Datum:
    - date_iso im Format YYYY-MM-DD.
    - Wenn nur Monat/Jahr angegeben: NICHT aufnehmen (zu ungenau).
-6) Uhrzeit:
+8) Uhrzeit:
    - time_24h nur wenn im Text vorhanden, sonst null.
-7) Kategorien:
+9) Kategorien:
    - meeting: Versammlung, Termin, Sitzung, Begehung
    - payment: Hausgeld, Vorschuss, Nachzahlung, Erstattung, Umlage, Rücklage-Zuführung
    - deadline: fällig bis, Frist, spätestens, Widerspruch bis, Einreichung bis
    - info: nur wenn ein konkreter Termin/Datum genannt wird, aber keine Zahlung/Frist/Meeting ist
-8) Keine Spekulation: nichts erfinden, keine Annahmen.
-9) source_quote:
+10) Keine Spekulation: nichts erfinden, keine Annahmen.
+11) source_quote:
    - Wenn möglich, gib ein kurzes direktes Zitat aus dem Text, das den Eintrag belegt.
    - Maximal 160 Zeichen.
-10) Gib ausschließlich valides JSON gemäß Schema zurück.
+12) Gib ausschließlich valides JSON gemäß Schema zurück.
 
 Ausgabeformat:
 {"items":[{"title":"...","date_iso":"YYYY-MM-DD","time_24h":null,"category":"meeting|payment|deadline|info","amount_eur":null,"description":"...","source_quote":"..."}]}

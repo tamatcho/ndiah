@@ -47,10 +47,14 @@ def _ingest_pdf(db, pdf_path: str, reindex: bool, property_id: int) -> tuple[boo
 
     text = extract_text_from_pdf(pdf_path)
     doc.extracted_text = text
-    chunks = simple_chunk(text)
+    chunks = simple_chunk(text, with_metadata=True)
     payload = [
-        {"document_id": doc.id, "chunk_id": f"{doc.id}-{i}", "text": ch}
-        for i, ch in enumerate(chunks)
+        {
+            "document_id": doc.id,
+            "chunk_id": f"{doc.id}-p{int(ch['page'])}-{int(ch['page_chunk_index'])}",
+            "text": str(ch["text"]),
+        }
+        for ch in chunks
     ]
     upsert_chunks(db, payload)
     if created_doc:

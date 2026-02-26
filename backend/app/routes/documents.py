@@ -90,10 +90,14 @@ def _ingest_pdf_content(db: Session, property_obj: Property, filename: str, cont
         raise HTTPException(status_code=400, detail="PDF konnte nicht gelesen werden.")
     doc.extracted_text = text
 
-    chunks = simple_chunk(text)
+    chunks = simple_chunk(text, with_metadata=True)
     payload = [
-        {"document_id": doc.id, "chunk_id": f"{doc.id}-{i}", "text": ch}
-        for i, ch in enumerate(chunks)
+        {
+            "document_id": doc.id,
+            "chunk_id": f"{doc.id}-p{int(ch['page'])}-{int(ch['page_chunk_index'])}",
+            "text": str(ch["text"]),
+        }
+        for ch in chunks
     ]
 
     try:
