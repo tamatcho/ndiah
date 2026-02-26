@@ -972,7 +972,8 @@ select:focus-visible {
   display: flex;
   flex-direction: column;
   gap: 10px;
-  padding-right: 2px;
+  padding-right: 12px;
+  scrollbar-gutter: stable;
 }
 
 #timelineCard .timeline-sticky-header {
@@ -1227,12 +1228,15 @@ select:focus-visible {
 .timeline-card-head {
   display: flex;
   justify-content: space-between;
-  align-items: center;
+  align-items: flex-start;
   gap: 10px;
 }
 
 .timeline-title {
   font-weight: 700;
+  min-width: 0;
+  flex: 1 1 auto;
+  word-break: break-word;
 }
 
 .timeline-card-archived .timeline-title {
@@ -1354,6 +1358,10 @@ select:focus-visible {
   font-weight: 700;
   background: #ecf4ff;
   color: #114a78;
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 
 .timeline-card-archived .badge {
