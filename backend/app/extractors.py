@@ -10,7 +10,14 @@ client = OpenAI(api_key=settings.OPENAI_API_KEY)
 
 
 CATEGORY_PRIORITY = {"deadline": 0, "payment": 1, "meeting": 2, "info": 3}
-DATE_PATTERN = re.compile(r"\b(?:\d{4}-\d{2}-\d{2}|\d{1,2}\.\d{1,2}\.\d{2,4})\b")
+DATE_PATTERN = re.compile(
+    r"\b(?:"
+    r"\d{4}-\d{2}-\d{2}"                           # ISO: 2026-01-15
+    r"|\d{1,2}\.\d{1,2}\.\d{2,4}"                  # German numeric: 15.01.2026
+    r"|\d{1,2}\.\s*(?:Januar|Februar|M[aä]rz|April|Mai|Juni|Juli|August|September|Oktober|November|Dezember)\s+\d{4}"  # German spelled: 15. Januar 2026
+    r")\b",
+    re.IGNORECASE,
+)
 TIMELINE_KEYWORD_PATTERN = re.compile(
     r"\b(f[aä]llig|frist|sp[aä]testens|zahlung|nachzahlung|versammlung|etv|termin|sitzung|widerspruch|einreichung)\b",
     re.IGNORECASE,
@@ -128,7 +135,8 @@ Regeln:
      außer der Text beschreibt diese Summe explizit als fällige Zahlung (z.B. "fällig", "zu zahlen bis", "zahlbar bis", "bitte überweisen").
 7) Datum:
    - date_iso im Format YYYY-MM-DD.
-   - Wenn nur Monat/Jahr angegeben: NICHT aufnehmen (zu ungenau).
+   - Konvertiere ausgeschriebene deutsche Monatsnamen: "15. Januar 2026" → "2026-01-15", "3. März 2025" → "2025-03-03".
+   - Wenn nur Monat/Jahr angegeben (kein Tag): NICHT aufnehmen (zu ungenau).
 8) Uhrzeit:
    - time_24h nur wenn im Text vorhanden, sonst null.
 9) Kategorien:

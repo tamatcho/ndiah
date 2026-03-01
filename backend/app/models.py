@@ -23,6 +23,7 @@ class Document(Base):
     content_type = Column(String, nullable=True)
     extracted_text = Column(Text, nullable=True)
     uploaded_at = Column(DateTime, default=datetime.utcnow)
+    quality_score = Column(Float, nullable=True)
 
 class Chunk(Base):
     __tablename__ = "chunks"
@@ -96,4 +97,27 @@ class Property(Base):
     user_id = Column(Integer, ForeignKey("users.id"), index=True, nullable=False)
     name = Column(String, nullable=False)
     address_optional = Column(String, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class UploadJob(Base):
+    __tablename__ = "upload_jobs"
+    id = Column(Integer, primary_key=True, index=True)
+    property_id = Column(Integer, ForeignKey("properties.id"), index=True, nullable=False)
+    status = Column(String, nullable=False, default="pending")  # pending/processing/completed/failed
+    processed_count = Column(Integer, nullable=False, default=0)
+    failed_count = Column(Integer, nullable=False, default=0)
+    failed_filenames = Column(Text, nullable=True)  # JSON array stored as text
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+
+class ChatMessage(Base):
+    __tablename__ = "chat_messages"
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), index=True, nullable=False)
+    property_id = Column(Integer, ForeignKey("properties.id"), index=True, nullable=True)
+    role = Column(String, nullable=False)           # "user" | "assistant"
+    text = Column(Text, nullable=False)
+    sources_json = Column(Text, nullable=True)      # JSON: list of {document_id, chunk_id}
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)

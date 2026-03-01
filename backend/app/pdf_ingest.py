@@ -101,7 +101,7 @@ def _compute_quality_score(total_pages: int, pages_with_text: int, text_length: 
     return round(score, 3)
 
 
-def _extract_text_from_pdf_bytes(content: bytes) -> str:
+def _extract_text_from_pdf_bytes(content: bytes) -> tuple[str, float]:
     reader = PdfReader(io.BytesIO(content))
     parts: list[str] = []
     pages_with_text = 0
@@ -128,15 +128,22 @@ def _extract_text_from_pdf_bytes(content: bytes) -> str:
         len(text_part),
         pages_with_tables,
     )
-    return combined
+    return combined, quality_score
 
 
 def extract_text_from_pdf(path: str) -> str:
     with open(path, "rb") as f:
-        return _extract_text_from_pdf_bytes(f.read())
+        text, _ = _extract_text_from_pdf_bytes(f.read())
+        return text
 
 
 def extract_text_from_pdf_bytes(content: bytes) -> str:
+    text, _ = _extract_text_from_pdf_bytes(content)
+    return text
+
+
+def extract_text_and_quality_from_pdf_bytes(content: bytes) -> tuple[str, float]:
+    """Returns (combined_text, quality_score). Use in the upload pipeline to store quality."""
     return _extract_text_from_pdf_bytes(content)
 
 

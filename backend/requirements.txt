@@ -11,3 +11,5 @@ sqlalchemy==2.0.32
 psycopg[binary]==3.2.6
 pytest==8.3.2
 firebase-admin==6.6.0
+slowapi==0.1.9
+limits==3.7.0

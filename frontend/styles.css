@@ -576,6 +576,12 @@ select:focus-visible {
   cursor: pointer;
 }
 
+.chip.danger {
+  border-color: #e8bfbf;
+  background: #fff0f0;
+  color: #9a2828;
+}
+
 .chat-history {
   max-height: 360px;
   overflow: auto;
@@ -848,6 +854,20 @@ select:focus-visible {
   background: #fff6f6;
   color: #875252;
   border: 1px solid #eedede;
+}
+
+.doc-quality-warn {
+  display: inline-block;
+  margin-left: 6px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: #8a5a00;
+  background: #fff8e1;
+  border: 1px solid #f0d060;
+  border-radius: 4px;
+  padding: 1px 5px;
+  vertical-align: middle;
+  white-space: nowrap;
 }
 
 .doc-menu {

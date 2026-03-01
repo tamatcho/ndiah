@@ -4,7 +4,7 @@ import ChatCard from "./components/cards/ChatCard";
 import TimelineCard from "./components/cards/TimelineCard";
 import UploadCard from "./components/cards/UploadCard";
 import ToastContainer from "./components/ToastContainer";
-import { ApiError, apiFetch, normalizeApiError, setApiAuthToken, uploadWithProgress } from "./lib/api";
+import { ApiError, apiFetch, deleteChatHistory, fetchChatHistory, fetchUploadJobStatus, normalizeApiError, setApiAuthToken, uploadWithProgress } from "./lib/api";
 import { auth } from "./lib/firebase";
 import {
   createUserWithEmailAndPassword,
@@ -235,23 +235,34 @@ export default function App() {
   }, [activePropertyId]);
 
   useEffect(() => {
-    if (!activePropertyId) return;
-    localStorage.setItem(`${CHAT_HISTORY_KEY_PREFIX}:${activePropertyId}`, JSON.stringify(chatHistory));
-  }, [chatHistory, activePropertyId]);
-
-  useEffect(() => {
-    if (!activePropertyId) {
+    if (!activePropertyId || !firebaseIdToken) {
       setChatHistory([]);
       return;
     }
-    try {
-      const raw = localStorage.getItem(`${CHAT_HISTORY_KEY_PREFIX}:${activePropertyId}`);
-      const parsed = raw ? JSON.parse(raw) : [];
-      setChatHistory(Array.isArray(parsed) ? parsed : []);
-    } catch {
-      setChatHistory([]);
-    }
-  }, [activePropertyId]);
+    fetchChatHistory(apiBase, activePropertyId)
+      .then((messages) => {
+        setChatHistory(
+          messages.map((m) => ({
+            id: String(m.id),
+            db_id: m.id,
+            role: m.role as "user" | "assistant",
+            text: m.text,
+            sources: m.sources ?? [],
+            sourceDetails: {},
+          }))
+        );
+      })
+      .catch(() => {
+        // Fallback to localStorage for backwards compatibility
+        try {
+          const raw = localStorage.getItem(`${CHAT_HISTORY_KEY_PREFIX}:${activePropertyId}`);
+          const parsed = raw ? JSON.parse(raw) : [];
+          setChatHistory(Array.isArray(parsed) ? parsed : []);
+        } catch {
+          setChatHistory([]);
+        }
+      });
+  }, [activePropertyId, firebaseIdToken]);
 
   useEffect(() => {
     if (!chatHistoryRef.current) return;
@@ -429,6 +440,50 @@ export default function App() {
     }
   };
 
+  const renameProperty = async () => {
+    if (!activePropertyId) return;
+    const current = properties.find((p) => p.id === activePropertyId);
+    const newName = window.prompt("Neuer Name der Immobilie:", current?.name ?? "");
+    if (!newName || newName.trim() === (current?.name ?? "").trim()) return;
+    setPropertiesPending(true);
+    try {
+      const { data } = await apiFetch<PropertyItem>(`${apiBase}/properties/${activePropertyId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: newName.trim() })
+      });
+      setProperties((prev) => prev.map((p) => (p.id === data.id ? data : p)));
+      addToast("success", "Umbenennen erfolgreich", data.name);
+    } catch (e) {
+      addToast("error", "Umbenennen fehlgeschlagen", normalizeApiError(e));
+    } finally {
+      setPropertiesPending(false);
+    }
+  };
+
+  const deleteProperty = async () => {
+    if (!activePropertyId) return;
+    const current = properties.find((p) => p.id === activePropertyId);
+    const confirmed = window.confirm(
+      `Immobilie "${current?.name ?? activePropertyId}" wirklich löschen?\n\nAlle Dokumente, Timeline-Einträge und der Chat-Verlauf dieser Immobilie werden dauerhaft gelöscht.`
+    );
+    if (!confirmed) return;
+    setPropertiesPending(true);
+    try {
+      await apiFetch(`${apiBase}/properties/${activePropertyId}`, { method: "DELETE" });
+      setProperties((prev) => prev.filter((p) => p.id !== activePropertyId));
+      setActivePropertyId(null);
+      setDocuments([]);
+      setChatHistory([]);
+      setTimelineItems([]);
+      addToast("success", "Immobilie gelöscht", current?.name);
+    } catch (e) {
+      addToast("error", "Löschen fehlgeschlagen", normalizeApiError(e));
+    } finally {
+      setPropertiesPending(false);
+    }
+  };
+
   const loadDocuments = async () => {
     if (!currentUser || !activePropertyId) {
       setDocuments([]);
@@ -578,31 +633,33 @@ export default function App() {
     }
   };
 
-  const pollBackgroundZipProcessing = async (initialDocCount: number) => {
-    if (!activePropertyId) return;
-    const maxAttempts = 12;
-    const waitMs = 2500;
-
+  const pollBackgroundZipProcessing = async (jobId: number) => {
+    const maxAttempts = 24; // 24 × 2.5s = 60s max
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-      await new Promise((resolve) => window.setTimeout(resolve, waitMs));
-      if (!activePropertyId) return;
-
+      await new Promise((resolve) => window.setTimeout(resolve, 2500));
       try {
-        const latest = await loadDocuments();
-        if (latest.length > initialDocCount) {
-          setUploadState("success");
-          setUploadMessage("Hintergrundverarbeitung abgeschlossen");
-          setUploadDetails(`${latest.length - initialDocCount} neue(s) Dokument(e) verfügbar.`);
-          addToast("success", "ZIP-Verarbeitung abgeschlossen", `${latest.length - initialDocCount} neue(s) Dokument(e).`);
-          await rebuildTimeline(true);
+        const job = await fetchUploadJobStatus(apiBase, jobId);
+        if (job.status === "completed") {
+          if (job.failed_count > 0) {
+            addToast("warning", "ZIP verarbeitet",
+              `${job.processed_count} OK, ${job.failed_count} fehlgeschlagen: ${job.failed_filenames.join(", ")}`);
+          } else {
+            addToast("success", "ZIP verarbeitet", `${job.processed_count} Dokument(e) indexiert.`);
+          }
+          await loadDocuments();
+          void rebuildTimeline(true);
           return;
         }
+        if (job.status === "failed") {
+          addToast("error", "ZIP-Verarbeitung fehlgeschlagen", "Bitte erneut versuchen.");
+          return;
+        }
+        // pending/processing → keep polling
       } catch {
-        // Continue polling; user can still refresh manually if needed.
+        // network error → keep polling
       }
     }
-
-    addToast("warning", "ZIP-Verarbeitung läuft noch", "Dokumente werden weiter im Hintergrund verarbeitet.");
+    addToast("warning", "ZIP-Verarbeitung dauert länger", "Bitte Seite später neu laden.");
   };
 
   const onUpload = async () => {
@@ -633,7 +690,6 @@ export default function App() {
     let uploadedDocuments = 0;
     let failedItems = 0;
     let queuedJobs = 0;
-    const initialDocCount = documents.length;
     const lines: string[] = [];
 
     for (let i = 0; i < selectedFiles.length; i += 1) {
@@ -648,7 +704,9 @@ export default function App() {
         if (data.queued) {
           queuedJobs += 1;
           lines.push(`IN ARBEIT ${file.name}: Hintergrundverarbeitung gestartet.`);
-          addToast("warning", "ZIP wird verarbeitet", data.message || "Bitte in Kürze erneut prüfen.");
+          if (typeof data.job_id === "number") {
+            void pollBackgroundZipProcessing(data.job_id);
+          }
           continue;
         }
         if (Array.isArray(data.documents)) {
@@ -673,7 +731,9 @@ export default function App() {
         } else {
           uploadedDocuments += 1;
           lines.push(`OK ${data.filename} (document_id: ${data.document_id}, indexed chunks: ${data.chunks_indexed})`);
-          if (data.filename) {
+          if (data.low_quality) {
+            addToast("warning", `Schlechte PDF-Qualität: ${data.filename}`, data.quality_warning ?? "Das PDF enthält möglicherweise zu wenig erkennbaren Text.");
+          } else if (data.filename) {
             addToast("success", `Dokument verarbeitet: ${data.filename}`);
           }
           if (typeof data.document_id === "number") {
@@ -725,9 +785,6 @@ export default function App() {
     await loadDocuments();
     if (uploadedDocuments > 0) {
       await rebuildTimeline(true);
-    }
-    if (queuedJobs > 0) {
-      void pollBackgroundZipProcessing(initialDocCount);
     }
   };
 
@@ -800,6 +857,15 @@ export default function App() {
       const message = normalizeApiError(e, "Unbekannter Fehler");
       addToast("error", "Snippet konnte nicht geladen werden", message);
     }
+  };
+
+  const clearChatHistory = async () => {
+    try {
+      await deleteChatHistory(apiBase, activePropertyId);
+    } catch {
+      // Best-effort — clear locally regardless
+    }
+    setChatHistory([]);
   };
 
   const onChatQuestionKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
@@ -1311,6 +1377,18 @@ export default function App() {
                         </option>
                       ))}
                     </select>
+                    {activePropertyId ? (
+                      <>
+                        <button className="chip" onClick={() => void renameProperty()} disabled={propertiesPending} title="Immobilie umbenennen">
+                          Umbenennen
+                        </button>
+                        <button className="chip danger" onClick={() => void deleteProperty()} disabled={propertiesPending} title="Immobilie löschen">
+                          Löschen
+                        </button>
+                      </>
+                    ) : null}
+                  </div>
+                  <div className="row wrap">
                     <input
                       placeholder="Neue Property"
                       value={newPropertyName}
@@ -1427,6 +1505,7 @@ export default function App() {
                 onRetry={() => void retryChat()}
                 onUseExample={setChatQuestion}
                 onLoadSnippet={(messageId, source) => void loadSourceSnippet(messageId, source)}
+                onClearHistory={() => void clearChatHistory()}
                 historyRef={chatHistoryRef}
               />
             </section>

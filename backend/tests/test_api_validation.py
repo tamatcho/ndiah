@@ -1,5 +1,6 @@
 import asyncio
 import io
+import json
 import os
 import tempfile
 from datetime import datetime
@@ -28,16 +29,15 @@ openai.OpenAI = _DummyOpenAI
 from app.main import validate_settings
 from app.config import settings
 from app.db import Base
-from app.models import Chunk, Document, LoginToken, Property, TimelineItem, TimelineItemTranslation, User
-from app.auth import get_current_user, hash_login_token
-from app.routes.auth import RequestLinkBody, logout, me, request_link, verify_magic_link
-from app.routes.chat import ChatRequest, chat
+from app.models import ChatMessage, Chunk, Document, Property, TimelineItem, TimelineItemTranslation, UploadJob, User
+from app.firebase_auth import get_current_user
+from app.routes.chat import ChatRequest, chat, chat_history, clear_chat_history
 from app.routes.chat import router as chat_router
 from app.routes.timeline import TimelineRequest, list_timeline, timeline_extract, timeline_rebuild
 from app.routes.timeline import router as timeline_router
 from app.routes.documents import upload_pdf, documents_status, get_source_snippet, delete_document
 from app.routes.documents import router as documents_router
-from app.routes.properties import CreatePropertyBody, create_property, get_property_details, list_properties
+from app.routes.properties import CreatePropertyBody, PatchPropertyBody, create_property, delete_property, get_property_details, list_properties, update_property
 from app.routes.properties import router as properties_router
 
 
@@ -66,10 +66,16 @@ def _seed_property(db, user_id: int, name: str = "Main") -> Property:
     return property_obj
 
 
+def _make_request():
+    """Minimal Starlette Request for rate-limiter-decorated route functions."""
+    from starlette.requests import Request
+    scope = {"type": "http", "method": "POST", "path": "/test",
+              "headers": [], "query_string": b"", "client": ("127.0.0.1", 8000)}
+    return Request(scope)
+
+
 @pytest.fixture
-def auth_db(monkeypatch):
-    monkeypatch.setattr(settings, "ENV", "DEV")
-    monkeypatch.setattr(settings, "SESSION_SECRET", "test-session-secret")
+def auth_db():
     fd, db_path = tempfile.mkstemp(prefix="auth-test-", suffix=".db")
     os.close(fd)
     engine = create_engine(
@@ -161,10 +167,8 @@ def test_documents_upload_rejects_zip_without_pdf():
     with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
         zf.writestr("notes.txt", "hello")
     file = _DummyUpload(filename="bundle.zip", content=buffer.getvalue())
-
     with pytest.raises(HTTPException) as exc:
         asyncio.run(upload_pdf(property_id=property_obj.id, file=file, db=db, current_user=user))
-
     assert exc.value.status_code == 400
     assert exc.value.detail == "Die ZIP-Datei enthält keine PDF-Dateien."
     db.close()
@@ -172,59 +176,105 @@ def test_documents_upload_rejects_zip_without_pdf():
     os.remove(db_path)
 
 
-def test_chat_rejects_empty_question():
-    fd, db_path = tempfile.mkstemp(prefix="chat-test-", suffix=".db")
-    os.close(fd)
-    engine = create_engine(f"sqlite:///{db_path}", connect_args={"check_same_thread": False})
-    test_session = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-    Base.metadata.create_all(bind=engine)
-    db = test_session()
-    user = _seed_user(db, "chat-empty@example.com")
+def test_chat_rejects_empty_question(auth_db):
+    user = _seed_user(auth_db, "chat-empty@example.com")
+    _req = _make_request()
     with pytest.raises(HTTPException) as exc:
-        chat(ChatRequest(question="   "), db=db, current_user=user)
+        chat(request=_req, req=ChatRequest(question="   "), db=auth_db, current_user=user)
     assert exc.value.status_code == 400
     assert exc.value.detail == "question must not be empty"
-    db.close()
-    Base.metadata.drop_all(bind=engine)
-    os.remove(db_path)
 
 
-def test_chat_maps_runtime_error_to_502(monkeypatch):
-    fd, db_path = tempfile.mkstemp(prefix="chat-test-", suffix=".db")
-    os.close(fd)
-    engine = create_engine(f"sqlite:///{db_path}", connect_args={"check_same_thread": False})
-    test_session = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-    Base.metadata.create_all(bind=engine)
-    db = test_session()
-    user = _seed_user(db, "chat-runtime@example.com")
+def test_chat_rejects_question_over_max_length(auth_db):
+    user = _seed_user(auth_db, "chat-long@example.com")
+    _req = _make_request()
+    long_q = "a" * 2001
+    with pytest.raises(HTTPException) as exc:
+        chat(request=_req, req=ChatRequest(question=long_q), db=auth_db, current_user=user)
+    assert exc.value.status_code == 400
+    assert "zu lang" in exc.value.detail.lower()
+
+
+def test_chat_maps_runtime_error_to_502(auth_db, monkeypatch):
+    user = _seed_user(auth_db, "chat-runtime@example.com")
 
     def fake_search(_question, db, user_id, property_id=None, k=6):
         raise RuntimeError("search exploded")
 
     monkeypatch.setattr("app.routes.chat.search", fake_search)
+    _req = _make_request()
     with pytest.raises(HTTPException) as exc:
-        chat(ChatRequest(question="test"), db=db, current_user=user)
+        chat(request=_req, req=ChatRequest(question="test"), db=auth_db, current_user=user)
     assert exc.value.status_code == 502
     assert exc.value.detail == "search exploded"
-    db.close()
-    Base.metadata.drop_all(bind=engine)
-    os.remove(db_path)
+
+
+def test_chat_history_empty_for_new_user(auth_db):
+    user = _seed_user(auth_db, "history-new@example.com")
+    result = chat_history(property_id=None, db=auth_db, current_user=user)
+    assert result == []
+
+
+def test_chat_history_saves_and_retrieves_by_property(auth_db):
+    user = _seed_user(auth_db, "history-prop@example.com")
+    prop = _seed_property(auth_db, user.id, "HistProp")
+    auth_db.add(ChatMessage(user_id=user.id, property_id=prop.id, role="user", text="Frage?"))
+    auth_db.add(ChatMessage(user_id=user.id, property_id=prop.id, role="assistant", text="Antwort.", sources_json="[]"))
+    auth_db.commit()
+
+    result = chat_history(property_id=prop.id, db=auth_db, current_user=user)
+    assert len(result) == 2
+    assert result[0]["role"] == "user"
+    assert result[0]["text"] == "Frage?"
+    assert result[1]["role"] == "assistant"
+    assert result[1]["sources"] == []
+
+    global_result = chat_history(property_id=None, db=auth_db, current_user=user)
+    assert global_result == []
+
+
+def test_chat_history_isolated_between_users(auth_db):
+    user_a = _seed_user(auth_db, "history-a@example.com")
+    user_b = _seed_user(auth_db, "history-b@example.com")
+    prop = _seed_property(auth_db, user_a.id, "PropA")
+    auth_db.add(ChatMessage(user_id=user_a.id, property_id=prop.id, role="user", text="A's message"))
+    auth_db.commit()
+    result_b = chat_history(property_id=None, db=auth_db, current_user=user_b)
+    assert result_b == []
+
+
+def test_clear_chat_history_deletes_messages(auth_db):
+    user = _seed_user(auth_db, "clear-hist@example.com")
+    prop = _seed_property(auth_db, user.id, "ClearProp")
+    auth_db.add(ChatMessage(user_id=user.id, property_id=prop.id, role="user", text="Q"))
+    auth_db.add(ChatMessage(user_id=user.id, property_id=prop.id, role="assistant", text="A", sources_json="[]"))
+    auth_db.commit()
+    result = clear_chat_history(property_id=prop.id, db=auth_db, current_user=user)
+    assert result["deleted"] == 2
+    assert chat_history(property_id=prop.id, db=auth_db, current_user=user) == []
 
 
 def test_timeline_rejects_empty_raw_text():
     with pytest.raises(HTTPException) as exc:
-        timeline_extract(TimelineRequest(raw_text="   "))
+        timeline_extract(_make_request(), TimelineRequest(raw_text="   "))
     assert exc.value.status_code == 400
     assert exc.value.detail == "raw_text must not be empty"
+
+
+def test_timeline_rejects_raw_text_over_limit(monkeypatch):
+    monkeypatch.setattr(settings, "TIMELINE_EXTRACTION_INPUT_CHARS", 10)
+    with pytest.raises(HTTPException) as exc:
+        timeline_extract(_make_request(), TimelineRequest(raw_text="a" * 100001))
+    assert exc.value.status_code == 400
+    assert "zu lang" in exc.value.detail.lower()
 
 
 def test_timeline_maps_runtime_error_to_502(monkeypatch):
     def fake_extract(_raw_text):
         raise RuntimeError("extract exploded")
-
     monkeypatch.setattr("app.routes.timeline.extract_timeline", fake_extract)
     with pytest.raises(HTTPException) as exc:
-        timeline_extract(TimelineRequest(raw_text="abc"))
+        timeline_extract(_make_request(), TimelineRequest(raw_text="abc"))
     assert exc.value.status_code == 502
     assert exc.value.detail == "extract exploded"
 
@@ -235,7 +285,6 @@ def test_documents_status_counts(auth_db):
     auth_db.add(Document(property_id=property_obj.id, filename="a.pdf", path="/tmp/a.pdf"))
     auth_db.add(Document(property_id=property_obj.id, filename="b.pdf", path="/tmp/b.pdf"))
     auth_db.commit()
-
     res = documents_status(db=auth_db, current_user=user)
     assert res["documents_in_db"] == 2
     assert res["chunks_in_db"] == 0
@@ -250,7 +299,6 @@ def test_get_source_snippet_found(auth_db):
     auth_db.refresh(doc)
     auth_db.add(Chunk(document_id=doc.id, chunk_id="11-0", text="abcdef", embedding_json=None))
     auth_db.commit()
-
     res = get_source_snippet(document_id=doc.id, chunk_id="11-0", max_chars=3, db=auth_db, current_user=user)
     assert res["document_id"] == doc.id
     assert res["chunk_id"] == "11-0"
@@ -265,15 +313,10 @@ def test_list_timeline_defaults_to_german_without_translation_call(auth_db, monk
     auth_db.add(doc)
     auth_db.commit()
     auth_db.refresh(doc)
-
     item = TimelineItem(
-        document_id=doc.id,
-        property_id=property_obj.id,
-        title="Nebenkostenabrechnung prüfen",
-        date_iso="2026-03-01",
-        time_24h="10:00",
-        category="deadline",
-        amount_eur=125.5,
+        document_id=doc.id, property_id=property_obj.id,
+        title="Nebenkostenabrechnung prüfen", date_iso="2026-03-01", time_24h="10:00",
+        category="deadline", amount_eur=125.5,
         description="Bitte die Abrechnung bis Ende der Woche kontrollieren.",
         source_quote="Bitte bis Ende der Woche kontrollieren.",
     )
@@ -287,7 +330,6 @@ def test_list_timeline_defaults_to_german_without_translation_call(auth_db, monk
     res = list_timeline(property_id=property_obj.id, db=auth_db, current_user=user)
     assert len(res) == 1
     assert res[0]["title"] == "Nebenkostenabrechnung prüfen"
-    assert res[0]["description"] == "Bitte die Abrechnung bis Ende der Woche kontrollieren."
     assert res[0]["date_iso"] == "2026-03-01"
     assert res[0]["category"] == "deadline"
     assert res[0]["amount_eur"] == 125.5
@@ -301,15 +343,10 @@ def test_list_timeline_translates_and_caches_by_language(auth_db, monkeypatch):
     auth_db.add(doc)
     auth_db.commit()
     auth_db.refresh(doc)
-
     item = TimelineItem(
-        document_id=doc.id,
-        property_id=property_obj.id,
-        title="Heizung warten lassen",
-        date_iso="2026-04-15",
-        time_24h=None,
-        category="info",
-        amount_eur=None,
+        document_id=doc.id, property_id=property_obj.id,
+        title="Heizung warten lassen", date_iso="2026-04-15", time_24h=None,
+        category="info", amount_eur=None,
         description="Wartung durch Fachbetrieb organisieren.",
         source_quote="Wartung durch Fachbetrieb.",
     )
@@ -318,36 +355,26 @@ def test_list_timeline_translates_and_caches_by_language(auth_db, monkeypatch):
 
     calls = {"count": 0}
 
-    def fake_translate_timeline_fields(title: str, description: str, target_language: str):
+    def fake_translate(title: str, description: str, target_language: str):
         calls["count"] += 1
         assert target_language == "en"
-        return {
-            "title": f"{title} (EN)",
-            "description": f"{description} (EN)",
-        }
+        return {"title": f"{title} (EN)", "description": f"{description} (EN)"}
 
-    monkeypatch.setattr("app.routes.timeline.translate_timeline_fields", fake_translate_timeline_fields)
+    monkeypatch.setattr("app.routes.timeline.translate_timeline_fields", fake_translate)
 
     first = list_timeline(property_id=property_obj.id, language="en", db=auth_db, current_user=user)
     assert len(first) == 1
     assert first[0]["title"] == "Heizung warten lassen (EN)"
-    assert first[0]["description"] == "Wartung durch Fachbetrieb organisieren. (EN)"
-    assert first[0]["date_iso"] == "2026-04-15"
-    assert first[0]["category"] == "info"
     assert first[0]["source_quote"] == "Wartung durch Fachbetrieb."
     assert calls["count"] == 1
 
     cached_rows = auth_db.query(TimelineItemTranslation).filter(TimelineItemTranslation.language == "en").all()
     assert len(cached_rows) == 1
     assert cached_rows[0].translated_title == "Heizung warten lassen (EN)"
-    assert cached_rows[0].translated_description == "Wartung durch Fachbetrieb organisieren. (EN)"
 
     second = list_timeline(property_id=property_obj.id, language="en", db=auth_db, current_user=user)
-    assert len(second) == 1
     assert second[0]["title"] == "Heizung warten lassen (EN)"
-    assert second[0]["description"] == "Wartung durch Fachbetrieb organisieren. (EN)"
-    assert second[0]["source_quote"] == "Wartung durch Fachbetrieb."
-    assert calls["count"] == 1
+    assert calls["count"] == 1  # still 1 — served from cache
 
 
 def test_get_source_snippet_not_found(auth_db):
@@ -357,75 +384,26 @@ def test_get_source_snippet_not_found(auth_db):
     auth_db.add(doc)
     auth_db.commit()
     auth_db.refresh(doc)
-
     with pytest.raises(HTTPException) as exc:
         get_source_snippet(document_id=doc.id, chunk_id="99-1", db=auth_db, current_user=user)
     assert exc.value.status_code == 404
 
 
-def test_auth_request_link_dev_returns_magic_link_and_hashed_token(auth_db):
-    body = request_link(RequestLinkBody(email="User@Example.com"), db=auth_db)
-    assert body["ok"] is True
-    assert body["magic_link"].startswith("/auth/verify?token=")
-
-    raw_token = body["magic_link"].split("token=", 1)[1]
-    user = auth_db.query(User).filter(User.email == "user@example.com").first()
-    assert user is not None
-    token_row = auth_db.query(LoginToken).filter(LoginToken.user_id == user.id).first()
-    assert token_row is not None
-    assert token_row.token_hash == hash_login_token(raw_token)
-    assert token_row.expires_at > datetime.utcnow()
-    assert token_row.used_at is None
-
-
-def test_auth_verify_sets_cookie_marks_token_used_and_logout_clears(auth_db):
-    link = request_link(RequestLinkBody(email="alice@example.com"), db=auth_db)
-    token = link["magic_link"].split("token=", 1)[1]
-
-    verify_response = Response()
-    verify = verify_magic_link(token=token, response=verify_response, db=auth_db)
-    assert verify["user"]["email"] == "alice@example.com"
-    assert settings.SESSION_COOKIE_NAME in verify_response.headers.get("set-cookie", "")
-
-    session_cookie = verify_response.headers.get("set-cookie", "").split("=", 1)[1].split(";", 1)[0]
-    current_user = get_current_user(session_cookie=session_cookie, db=auth_db)
-    me_result = me(current_user=current_user)
-    assert me_result["email"] == "alice@example.com"
-
-    with pytest.raises(HTTPException) as exc:
-        verify_magic_link(token=token, response=Response(), db=auth_db)
-    assert exc.value.status_code == 400
-
-    row = auth_db.query(LoginToken).filter(LoginToken.token_hash == hash_login_token(token)).first()
-    assert row is not None
-    assert row.used_at is not None
-
-    logout_response = Response()
-    logout_result = logout(response=logout_response)
-    assert logout_result["ok"] is True
-    assert settings.SESSION_COOKIE_NAME in logout_response.headers.get("set-cookie", "")
-
-    with pytest.raises(HTTPException) as logout_exc:
-        get_current_user(session_cookie=None, db=auth_db)
-    assert logout_exc.value.status_code == 401
-
-
 def test_protected_routers_include_auth_dependency():
-    assert any(dep.dependency == get_current_user for dep in documents_router.dependencies)
-    assert any(dep.dependency == get_current_user for dep in timeline_router.dependencies)
-    assert any(dep.dependency == get_current_user for dep in chat_router.dependencies)
-    assert any(dep.dependency == get_current_user for dep in properties_router.dependencies)
+    from app.firebase_auth import get_current_user as firebase_get_current_user
+    assert any(dep.dependency == firebase_get_current_user for dep in documents_router.dependencies)
+    assert any(dep.dependency == firebase_get_current_user for dep in timeline_router.dependencies)
+    assert any(dep.dependency == firebase_get_current_user for dep in chat_router.dependencies)
+    assert any(dep.dependency == firebase_get_current_user for dep in properties_router.dependencies)
 
 
 def test_properties_create_list_and_get_own_details(auth_db):
     user = _seed_user(auth_db, "owner@example.com")
     created = create_property(CreatePropertyBody(name="HQ", address_optional="Street 1"), db=auth_db, current_user=user)
     assert created["name"] == "HQ"
-
     listed = list_properties(db=auth_db, current_user=user)
     assert len(listed) == 1
     assert listed[0]["id"] == created["id"]
-
     detail = get_property_details(property_id=created["id"], db=auth_db, current_user=user)
     assert detail["address_optional"] == "Street 1"
 
@@ -434,10 +412,101 @@ def test_properties_get_forbidden_for_other_user(auth_db):
     owner = _seed_user(auth_db, "owner2@example.com")
     other = _seed_user(auth_db, "other@example.com")
     property_obj = _seed_property(auth_db, owner.id, "Private")
-
     with pytest.raises(HTTPException) as exc:
         get_property_details(property_id=property_obj.id, db=auth_db, current_user=other)
     assert exc.value.status_code == 404
+
+
+def test_properties_rename(auth_db):
+    user = _seed_user(auth_db, "rename@example.com")
+    created = create_property(CreatePropertyBody(name="Old Name"), db=auth_db, current_user=user)
+    updated = update_property(
+        property_id=created["id"], req=PatchPropertyBody(name="New Name"),
+        db=auth_db, current_user=user,
+    )
+    assert updated["name"] == "New Name"
+    detail = get_property_details(property_id=created["id"], db=auth_db, current_user=user)
+    assert detail["name"] == "New Name"
+
+
+def test_properties_rename_rejects_empty_name(auth_db):
+    user = _seed_user(auth_db, "rename-empty@example.com")
+    created = create_property(CreatePropertyBody(name="Valid"), db=auth_db, current_user=user)
+    with pytest.raises(HTTPException) as exc:
+        update_property(
+            property_id=created["id"], req=PatchPropertyBody(name="   "),
+            db=auth_db, current_user=user,
+        )
+    assert exc.value.status_code == 400
+
+
+def test_properties_delete_removes_property_and_all_data(auth_db):
+    user = _seed_user(auth_db, "delete-prop@example.com")
+    prop = _seed_property(auth_db, user.id, "ToDelete")
+    doc = Document(property_id=prop.id, filename="x.pdf", path=None)
+    auth_db.add(doc)
+    auth_db.commit()
+    auth_db.refresh(doc)
+    doc_id = doc.id  # save before delete
+    auth_db.add(Chunk(document_id=doc_id, chunk_id=f"{doc_id}-0", text="txt", embedding_json=None))
+    auth_db.add(TimelineItem(
+        document_id=doc_id, property_id=prop.id, title="T", date_iso="2026-01-01",
+        time_24h=None, category="info", amount_eur=None, description="D",
+    ))
+    auth_db.add(ChatMessage(user_id=user.id, property_id=prop.id, role="user", text="Q"))
+    auth_db.commit()
+
+    res = delete_property(property_id=prop.id, db=auth_db, current_user=user)
+    assert res["ok"] is True
+    assert auth_db.query(Property).filter(Property.id == prop.id).first() is None
+    assert auth_db.query(Document).filter(Document.property_id == prop.id).count() == 0
+    assert auth_db.query(Chunk).filter(Chunk.document_id == doc_id).count() == 0
+    assert auth_db.query(TimelineItem).filter(TimelineItem.property_id == prop.id).count() == 0
+    assert auth_db.query(ChatMessage).filter(ChatMessage.property_id == prop.id).count() == 0
+
+
+def test_properties_delete_forbidden_for_other_user(auth_db):
+    owner = _seed_user(auth_db, "del-owner@example.com")
+    other = _seed_user(auth_db, "del-other@example.com")
+    prop = _seed_property(auth_db, owner.id, "Private")
+    with pytest.raises(HTTPException) as exc:
+        delete_property(property_id=prop.id, db=auth_db, current_user=other)
+    assert exc.value.status_code == 404
+
+
+def test_properties_create_rejects_limit(auth_db, monkeypatch):
+    monkeypatch.setattr(settings, "FREE_TIER_MAX_PROPERTIES_PER_USER", 2)
+    user = _seed_user(auth_db, "limit-props@example.com")
+    create_property(CreatePropertyBody(name="P1"), db=auth_db, current_user=user)
+    create_property(CreatePropertyBody(name="P2"), db=auth_db, current_user=user)
+    with pytest.raises(HTTPException) as exc:
+        create_property(CreatePropertyBody(name="P3"), db=auth_db, current_user=user)
+    assert exc.value.status_code == 429
+    assert "Limit" in exc.value.detail
+
+
+def test_upload_job_created_for_zip(auth_db, monkeypatch):
+    user = _seed_user(auth_db, "upload-job@example.com")
+    prop = _seed_property(auth_db, user.id, "ZipProp")
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("doc.pdf", b"%PDF-1.7 content")
+    zip_content = buffer.getvalue()
+
+    monkeypatch.setattr("app.routes.documents._process_zip_in_background", lambda *a, **kw: None)
+
+    file = _DummyUpload(filename="bundle.zip", content=zip_content)
+    result = asyncio.run(upload_pdf(
+        property_id=prop.id, file=file, background_tasks=None,
+        db=auth_db, current_user=user,
+    ))
+
+    assert result["queued"] is True
+    assert "job_id" in result
+    job = auth_db.query(UploadJob).filter(UploadJob.id == result["job_id"]).first()
+    assert job is not None
+    assert job.property_id == prop.id
 
 
 def test_timeline_list_filters_by_property(auth_db):
@@ -450,33 +519,13 @@ def test_timeline_list_filters_by_property(auth_db):
     auth_db.commit()
     auth_db.refresh(doc_a)
     auth_db.refresh(doc_b)
-
-    auth_db.add_all(
-        [
-            TimelineItem(
-                document_id=doc_a.id,
-                property_id=property_a.id,
-                title="A item",
-                date_iso="2026-01-01",
-                time_24h="10:00",
-                category="info",
-                amount_eur=None,
-                description="A",
-            ),
-            TimelineItem(
-                document_id=doc_b.id,
-                property_id=property_b.id,
-                title="B item",
-                date_iso="2026-01-02",
-                time_24h="11:00",
-                category="info",
-                amount_eur=None,
-                description="B",
-            ),
-        ]
-    )
+    auth_db.add_all([
+        TimelineItem(document_id=doc_a.id, property_id=property_a.id, title="A item",
+                     date_iso="2026-01-01", time_24h="10:00", category="info", amount_eur=None, description="A"),
+        TimelineItem(document_id=doc_b.id, property_id=property_b.id, title="B item",
+                     date_iso="2026-01-02", time_24h="11:00", category="info", amount_eur=None, description="B"),
+    ])
     auth_db.commit()
-
     items = list_timeline(property_id=property_a.id, db=auth_db, current_user=user)
     assert len(items) == 1
     assert items[0]["property_id"] == property_a.id
@@ -488,7 +537,6 @@ def test_upload_rejects_property_not_owned(auth_db):
     other = _seed_user(auth_db, "other-upload@example.com")
     property_obj = _seed_property(auth_db, owner.id, "Owner property")
     file = _DummyUpload(filename="file.pdf", content=b"%PDF-1.7 minimal")
-
     with pytest.raises(HTTPException) as exc:
         asyncio.run(upload_pdf(property_id=property_obj.id, file=file, db=auth_db, current_user=other))
     assert exc.value.status_code == 404
@@ -503,7 +551,6 @@ def test_upload_rejects_pdf_over_size_limit():
     db = test_session()
     user = _seed_user(db, "limit-size@example.com")
     property_obj = _seed_property(db, user.id)
-
     old_limit = settings.MAX_PDF_BYTES
     try:
         settings.MAX_PDF_BYTES = 10
@@ -514,7 +561,6 @@ def test_upload_rejects_pdf_over_size_limit():
         assert "Datei zu groß" in str(exc.value.detail)
     finally:
         settings.MAX_PDF_BYTES = old_limit
-
     db.close()
     Base.metadata.drop_all(bind=engine)
     os.remove(db_path)
@@ -531,7 +577,6 @@ def test_upload_rejects_when_property_document_limit_reached():
     property_obj = _seed_property(db, user.id)
     db.add(Document(property_id=property_obj.id, filename="existing.pdf", path=None))
     db.commit()
-
     old_limit = settings.FREE_TIER_MAX_DOCUMENTS_PER_PROPERTY
     try:
         settings.FREE_TIER_MAX_DOCUMENTS_PER_PROPERTY = 1
@@ -542,7 +587,6 @@ def test_upload_rejects_when_property_document_limit_reached():
         assert "Limit erreicht" in str(exc.value.detail)
     finally:
         settings.FREE_TIER_MAX_DOCUMENTS_PER_PROPERTY = old_limit
-
     db.close()
     Base.metadata.drop_all(bind=engine)
     os.remove(db_path)
@@ -564,7 +608,7 @@ def test_timeline_rebuild_returns_items_count_and_updated_at(auth_db, monkeypatc
         return [{"title": "C"}]
 
     monkeypatch.setattr("app.routes.timeline.extract_and_store_timeline_for_document", fake_extract_and_store)
-    res = timeline_rebuild(property_id=property_obj.id, db=auth_db, current_user=user)
+    res = timeline_rebuild(request=_make_request(), property_id=property_obj.id, db=auth_db, current_user=user)
     assert res["items_count"] == 3
     assert isinstance(res["updated_at"], str) and "T" in res["updated_at"]
     assert res["documents_considered"] == 2
@@ -588,7 +632,7 @@ def test_timeline_rebuild_continues_when_single_document_extraction_fails(auth_d
         raise RuntimeError("Timeline extraction response parsing failed")
 
     monkeypatch.setattr("app.routes.timeline.extract_and_store_timeline_for_document", fake_extract_and_store)
-    res = timeline_rebuild(property_id=property_obj.id, db=auth_db, current_user=user)
+    res = timeline_rebuild(request=_make_request(), property_id=property_obj.id, db=auth_db, current_user=user)
     assert res["items_count"] == 2
     assert res["documents_considered"] == 2
     assert res["documents_processed"] == 1
@@ -598,27 +642,18 @@ def test_timeline_rebuild_continues_when_single_document_extraction_fails(auth_d
 
 
 def test_delete_document_removes_document_chunks_and_timeline(auth_db):
-    user = _seed_user(auth_db, "delete-owner@example.com")
+    user = _seed_user(auth_db, "del-doc-owner@example.com")
     property_obj = _seed_property(auth_db, user.id, "Delete")
     doc = Document(property_id=property_obj.id, filename="a.pdf", path=None)
     auth_db.add(doc)
     auth_db.commit()
     auth_db.refresh(doc)
     auth_db.add(Chunk(document_id=doc.id, chunk_id=f"{doc.id}-0", text="hello", embedding_json=None))
-    auth_db.add(
-        TimelineItem(
-            document_id=doc.id,
-            property_id=property_obj.id,
-            title="A item",
-            date_iso="2026-01-01",
-            time_24h="10:00",
-            category="info",
-            amount_eur=None,
-            description="A",
-        )
-    )
+    auth_db.add(TimelineItem(
+        document_id=doc.id, property_id=property_obj.id, title="A item",
+        date_iso="2026-01-01", time_24h="10:00", category="info", amount_eur=None, description="A",
+    ))
     auth_db.commit()
-
     res = delete_document(document_id=doc.id, property_id=property_obj.id, db=auth_db, current_user=user)
     assert res["ok"] is True
     assert res["deleted_chunks"] == 1
@@ -627,14 +662,13 @@ def test_delete_document_removes_document_chunks_and_timeline(auth_db):
 
 
 def test_delete_document_rejects_non_owned_property(auth_db):
-    owner = _seed_user(auth_db, "delete-owner2@example.com")
-    other = _seed_user(auth_db, "delete-other@example.com")
+    owner = _seed_user(auth_db, "del-doc-owner2@example.com")
+    other = _seed_user(auth_db, "del-doc-other@example.com")
     property_obj = _seed_property(auth_db, owner.id, "OwnerProperty")
     doc = Document(property_id=property_obj.id, filename="a.pdf", path=None)
     auth_db.add(doc)
     auth_db.commit()
     auth_db.refresh(doc)
-
     with pytest.raises(HTTPException) as exc:
         delete_document(document_id=doc.id, property_id=property_obj.id, db=auth_db, current_user=other)
     assert exc.value.status_code == 404

@@ -142,6 +142,14 @@ export default function UploadCard(props: Props) {
                     <div className="doc-main">
                       <div className="doc-name" title={doc.filename}>
                         {doc.filename}
+                        {doc.quality_score != null && doc.quality_score < 0.3 ? (
+                          <span
+                            className="doc-quality-warn"
+                            title={`Niedrige PDF-Qualität (Score: ${doc.quality_score.toFixed(2)}). Möglicherweise hauptsächlich Bilder ohne erkannten Text.`}
+                          >
+                            ⚠ Niedrige Qualität
+                          </span>
+                        ) : null}
                       </div>
                       <div className="doc-time">Hochgeladen: {doc.uploaded_at ? new Date(doc.uploaded_at).toLocaleString("de-DE") : "-"}</div>
                     </div>

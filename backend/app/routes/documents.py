@@ -1,15 +1,19 @@
+import logging
 import os
 import re
 import io
+import json
 import zipfile
 from fastapi import APIRouter, UploadFile, File, Depends, HTTPException, Form, BackgroundTasks
 from sqlalchemy.orm import Session
 
+logger = logging.getLogger(__name__)
+
 from ..firebase_auth import get_current_user
 from ..config import settings
 from ..db import get_db, SessionLocal
-from ..models import Chunk, Document, Property, TimelineItem, User
-from ..pdf_ingest import extract_text_from_pdf_bytes, simple_chunk
+from ..models import Chunk, Document, Property, TimelineItem, UploadJob, User
+from ..pdf_ingest import extract_text_and_quality_from_pdf_bytes, extract_text_from_pdf_bytes, simple_chunk
 from ..property_access import get_owned_property_or_404
 from ..rag import upsert_chunks
 from ..timeline_service import extract_and_store_timeline_for_document
@@ -78,78 +82,121 @@ def _ingest_pdf_content(db: Session, property_obj: Property, filename: str, cont
     )
     try:
         db.add(doc)
-        db.commit()
-        db.refresh(doc)
-    except Exception:
-        db.rollback()
-        raise HTTPException(status_code=500, detail="Dokumentmetadaten konnten nicht gespeichert werden.")
+        db.flush()  # get doc.id from DB sequence without committing
 
-    try:
-        text = extract_text_from_pdf_bytes(content)
-    except Exception:
-        raise HTTPException(status_code=400, detail="PDF konnte nicht gelesen werden.")
-    doc.extracted_text = text
+        logger.info("Ingesting PDF property_id=%d filename=%s size_bytes=%d", property_obj.id, safe_filename, len(content))
 
-    chunks = simple_chunk(text, with_metadata=True)
-    payload = [
-        {
-            "document_id": doc.id,
-            "chunk_id": f"{doc.id}-p{int(ch['page'])}-{int(ch['page_chunk_index'])}",
-            "text": str(ch["text"]),
-        }
-        for ch in chunks
-    ]
+        text, quality_score = extract_text_and_quality_from_pdf_bytes(content)
+        doc.extracted_text = text
+        doc.quality_score = quality_score
 
-    try:
+        if quality_score < settings.PDF_QUALITY_WARN_THRESHOLD:
+            logger.warning("Low quality PDF property_id=%d filename=%s quality_score=%.3f", property_obj.id, safe_filename, quality_score)
+
+        chunks = simple_chunk(text, with_metadata=True)
+        payload = [
+            {
+                "document_id": doc.id,
+                "chunk_id": f"{doc.id}-p{int(ch['page'])}-{int(ch['page_chunk_index'])}",
+                "text": str(ch["text"]),
+            }
+            for ch in chunks
+        ]
         upsert_chunks(db, payload)
-    except RuntimeError as e:
-        db.rollback()
-        raise HTTPException(status_code=502, detail=str(e))
-    except Exception:
-        db.rollback()
-        raise HTTPException(status_code=500, detail="Indexierung der Dokumentinhalte fehlgeschlagen.")
 
-    try:
         timeline_items = extract_and_store_timeline_for_document(db, doc, raw_text=text)
-        db.commit()
+
+        db.commit()  # single commit: doc + chunks + timeline together
+        logger.info("Ingested PDF property_id=%d filename=%s chunks=%d timeline_items=%d quality=%.3f", property_obj.id, safe_filename, len(payload), len(timeline_items), quality_score)
+    except HTTPException:
+        db.rollback()
+        raise
     except RuntimeError as e:
         db.rollback()
+        logger.error("PDF ingest failed (OpenAI) property_id=%d filename=%s error=%s", property_obj.id, safe_filename, str(e))
         raise HTTPException(status_code=502, detail=str(e))
     except Exception:
         db.rollback()
-        raise HTTPException(status_code=500, detail="Timeline-Extraktion fehlgeschlagen.")
+        logger.exception("PDF ingest failed property_id=%d filename=%s", property_obj.id, safe_filename)
+        raise HTTPException(status_code=500, detail="Dokumentverarbeitung fehlgeschlagen.")
 
-    return {
+    result: dict = {
         "document_id": doc.id,
         "property_id": doc.property_id,
         "filename": doc.filename,
         "uploaded_at": doc.uploaded_at.isoformat() if doc.uploaded_at else None,
         "chunks_indexed": len(payload),
         "timeline_items_upserted": len(timeline_items),
+        "quality_score": quality_score,
     }
+    if quality_score < settings.PDF_QUALITY_WARN_THRESHOLD:
+        result["low_quality"] = True
+        result["quality_warning"] = (
+            f"PDF-Qualität niedrig (Score: {quality_score:.2f}). "
+            "Das Dokument enthält möglicherweise hauptsächlich Bilder ohne erkannten Text. "
+            "Antworten und Timeline könnten unvollständig sein."
+        )
+    return result
 
 
-def _process_zip_in_background(property_id: int, zip_content: bytes) -> None:
+def _process_zip_in_background(job_id: int, property_id: int, zip_content: bytes) -> None:
     db = SessionLocal()
     try:
+        job = db.query(UploadJob).filter(UploadJob.id == job_id).first()
+        if not job:
+            return
+        job.status = "processing"
+        db.commit()
+
         property_obj = db.query(Property).filter(Property.id == property_id).first()
         if not property_obj:
+            job.status = "failed"
+            db.commit()
             return
+
+        processed_count = 0
+        failed_count = 0
+        failed_filenames: list[str] = []
+
         with zipfile.ZipFile(io.BytesIO(zip_content), "r") as archive:
             entries = [entry for entry in archive.infolist() if not entry.is_dir()]
             pdf_entries = [entry for entry in entries if entry.filename.lower().endswith(".pdf")]
+            logger.info("ZIP processing job_id=%d property_id=%d total_pdfs=%d", job_id, property_id, len(pdf_entries))
             for entry in pdf_entries:
                 try:
                     inner_name = _sanitize_filename(entry.filename)
                     inner_content = archive.read(entry)
-                    if len(inner_content) > settings.MAX_PDF_BYTES:
-                        continue
-                    if not inner_content.startswith(b"%PDF"):
+                    if len(inner_content) > settings.MAX_PDF_BYTES or not inner_content.startswith(b"%PDF"):
+                        failed_count += 1
+                        failed_filenames.append(inner_name)
+                        logger.warning("ZIP PDF skipped job_id=%d filename=%s reason=invalid_or_too_large", job_id, inner_name)
                         continue
                     _ingest_pdf_content(db, property_obj, inner_name, inner_content)
-                except Exception:
+                    processed_count += 1
+                except Exception as exc:
                     db.rollback()
-                    continue
+                    failed_count += 1
+                    failed_filenames.append(entry.filename)
+                    logger.warning("ZIP PDF failed job_id=%d filename=%s error=%s", job_id, entry.filename, str(exc))
+
+        job = db.query(UploadJob).filter(UploadJob.id == job_id).first()
+        if job:
+            job.status = "completed"
+            job.processed_count = processed_count
+            job.failed_count = failed_count
+            job.failed_filenames = json.dumps(failed_filenames, ensure_ascii=False)
+            db.commit()
+        logger.info("ZIP completed job_id=%d processed=%d failed=%d", job_id, processed_count, failed_count)
+    except Exception:
+        db.rollback()
+        logger.exception("ZIP background task crashed job_id=%d property_id=%d", job_id, property_id)
+        try:
+            job = db.query(UploadJob).filter(UploadJob.id == job_id).first()
+            if job:
+                job.status = "failed"
+                db.commit()
+        except Exception:
+            pass
     finally:
         db.close()
 
@@ -201,6 +248,7 @@ def list_documents(
             "property_id": d.property_id,
             "filename": d.filename,
             "uploaded_at": d.uploaded_at.isoformat() if d.uploaded_at else None,
+            "quality_score": d.quality_score,
         }
         for d in docs
     ]
@@ -288,21 +336,54 @@ async def upload_pdf(
                 status_code=400,
                 detail=f"Gesamtgröße der PDFs in der ZIP überschreitet das Limit ({MAX_ZIP_TOTAL_PDF_BYTES} Bytes).",
             )
+    job = UploadJob(property_id=property_obj.id, status="pending")
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+
     if background_tasks is not None:
-        background_tasks.add_task(_process_zip_in_background, property_obj.id, content)
+        background_tasks.add_task(_process_zip_in_background, job.id, property_obj.id, content)
     else:
-        _process_zip_in_background(property_obj.id, content)
+        _process_zip_in_background(job.id, property_obj.id, content)
 
     return {
         "archive_filename": safe_filename,
         "property_id": property_obj.id,
-        "processed_count": 0,
-        "failed_count": 0,
-        "timeline_items_upserted": 0,
-        "documents": [],
-        "failed_documents": [],
+        "job_id": job.id,
         "queued": True,
         "message": "ZIP-Verarbeitung wurde gestartet. Dokumente erscheinen nach der Hintergrundverarbeitung.",
+    }
+
+
+@router.get("/upload-jobs/{job_id}")
+def get_upload_job(
+    job_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    job = (
+        db.query(UploadJob)
+        .join(Property, UploadJob.property_id == Property.id)
+        .filter(UploadJob.id == job_id, Property.user_id == current_user.id)
+        .first()
+    )
+    if not job:
+        raise HTTPException(status_code=404, detail="Upload-Job nicht gefunden")
+    failed_filenames: list[str] = []
+    if job.failed_filenames:
+        try:
+            failed_filenames = json.loads(job.failed_filenames)
+        except Exception:
+            pass
+    return {
+        "job_id": job.id,
+        "property_id": job.property_id,
+        "status": job.status,
+        "processed_count": job.processed_count,
+        "failed_count": job.failed_count,
+        "failed_filenames": failed_filenames,
+        "created_at": job.created_at.isoformat(),
+        "updated_at": job.updated_at.isoformat(),
     }
 
 

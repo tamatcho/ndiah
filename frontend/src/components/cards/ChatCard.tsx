@@ -19,6 +19,7 @@ type Props = {
   onRetry: () => void;
   onUseExample: (q: string) => void;
   onLoadSnippet: (messageId: string, source: Source) => void;
+  onClearHistory?: () => void;
   historyRef: RefObject<HTMLDivElement>;
 };
 
@@ -44,6 +45,15 @@ export default function ChatCard(props: Props) {
       <div className="card-title-row">
         <h2>Chat über Dokumente</h2>
         {props.state === "loading" ? <span className="card-title-spinner" aria-hidden="true" /> : null}
+        {props.chatHistory.length > 0 && props.onClearHistory ? (
+          <button
+            className="chip"
+            disabled={props.chatPending || props.disabled}
+            onClick={props.onClearHistory}
+          >
+            Verlauf löschen
+          </button>
+        ) : null}
       </div>
       <StatusBanner state={props.state} message={props.message} details={props.details} />
       <div id="chatHistory" className="chat-history" ref={props.historyRef}>
@@ -91,10 +101,6 @@ export default function ChatCard(props: Props) {
                           </div>
                           <div>
                             Stand: Dokument vom {formatDocumentDate(doc?.uploaded_at)}
-                          </div>
-                          <div>
-                            document_id: {s.document_id}, chunk_id: {s.chunk_id}, score:{" "}
-                            {typeof s.score === "number" ? s.score.toFixed(3) : "-"}
                           </div>
                           {typeof s.page === "number" ? <div>Seite: {s.page}</div> : null}
                           <button className="source-btn" disabled={props.chatPending || props.disabled} onClick={() => props.onLoadSnippet(msg.id, s)}>

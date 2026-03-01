@@ -24,6 +24,31 @@ def extract_and_store_timeline_for_document(
     result = extract_timeline(text)
     items = [item.model_dump() for item in result.items]
 
+    # Deduplicate within this extraction result: keep the item with the richer description
+    seen: dict[tuple, dict] = {}
+    for item in items:
+        key = (item["date_iso"], item["title"].strip().lower())
+        existing = seen.get(key)
+        if existing is None or len(item.get("description", "")) > len(existing.get("description", "")):
+            seen[key] = item
+    items = list(seen.values())
+
+    # Skip items that already exist in the DB for this property from a different document
+    if items:
+        existing_rows = (
+            db.query(TimelineItem.date_iso, TimelineItem.title)
+            .filter(
+                TimelineItem.property_id == doc.property_id,
+                TimelineItem.document_id != doc.id,
+            )
+            .all()
+        )
+        existing_keys = {(row.date_iso, row.title.strip().lower()) for row in existing_rows}
+        items = [
+            item for item in items
+            if (item["date_iso"], item["title"].strip().lower()) not in existing_keys
+        ]
+
     db.query(TimelineItem).filter(TimelineItem.document_id == doc.id).delete(
         synchronize_session=False
     )

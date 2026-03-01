@@ -110,6 +110,34 @@ export async function apiCall<T>(url: string, options: ApiFetchOptions = {}): Pr
   return apiFetch<T>(url, options);
 }
 
+export async function fetchUploadJobStatus(apiBase: string, jobId: number) {
+  const { data } = await apiFetch<import("../types").UploadJob>(`${apiBase}/documents/upload-jobs/${jobId}`);
+  return data;
+}
+
+type ApiChatMessage = {
+  id: number;
+  role: string;
+  text: string;
+  sources: import("../types").Source[];
+  created_at: string;
+};
+
+export async function fetchChatHistory(apiBase: string, propertyId: number | null): Promise<ApiChatMessage[]> {
+  const url = propertyId != null
+    ? `${apiBase}/chat/history?property_id=${propertyId}`
+    : `${apiBase}/chat/history`;
+  const { data } = await apiFetch<ApiChatMessage[]>(url);
+  return data;
+}
+
+export async function deleteChatHistory(apiBase: string, propertyId: number | null): Promise<void> {
+  const url = propertyId != null
+    ? `${apiBase}/chat/history?property_id=${propertyId}`
+    : `${apiBase}/chat/history`;
+  await apiFetch(url, { method: "DELETE" });
+}
+
 export async function fetchJson<T>(url: string, options: RequestInit = {}): Promise<T> {
   const { data } = await apiFetch<T>(url, options);
   return data;

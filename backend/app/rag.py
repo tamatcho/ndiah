@@ -117,7 +117,11 @@ def search(query: str, db: Session, user_id: int, property_id: int | None = None
     scores = _cosine_similarity(query_vec, vectors)
     top_k = max(1, k)
     best_idx = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[:top_k]
-    return [{**candidates[i], "score": float(scores[i])} for i in best_idx]
+    return [
+        {**candidates[i], "score": float(scores[i])}
+        for i in best_idx
+        if scores[i] >= settings.MIN_SIMILARITY_SCORE
+    ]
 
 
 def answer_with_context(question: str, contexts: list[dict], language: str = "de") -> dict:
@@ -153,16 +157,20 @@ def answer_with_context(question: str, contexts: list[dict], language: str = "de
     )
     allowed_sources = {(int(c["document_id"]), str(c["chunk_id"])) for c in contexts}
     system_prompt = (
-        "Du bist ein Assistent fuer Wohnungseigentuemer. Nutze AUSSCHLIESSLICH den bereitgestellten Kontext.\n"
-        "Der Kontext ist in der Originalsprache der Dokumente (meist Deutsch). Lies und interpretiere ihn unveraendert.\n"
-        f"Antworte in {output_language} und schreibe auch key_points in {output_language}.\n"
-        "Wenn Informationen im Kontext fehlen, liste sie unter missing_info auf und rate nicht.\n"
-        "Behalte Zahlen, Daten, Waehrungen und Betraege exakt wie im Kontext bei.\n"
-        "Erklaere juristische und finanzielle Begriffe in einfacher Sprache fuer Nicht-Muttersprachler.\n"
-        "Uebersetze, aendere oder paraphrasiere Quellenreferenzen nicht; DOC/chunk-Bezeichner muessen unveraendert bleiben.\n"
-        "Gib ausschließlich JSON im Format zurück:\n"
-        "{\"answer\":\"...\",\"key_points\":[\"...\"],\"sources\":[{\"document_id\":number,\"chunk_id\":\"...\"}],\"missing_info\":[\"...\"]}\n"
-        "Die sources duerfen nur DOC/chunk-Labels referenzieren, die im Kontext vorhanden sind."
+        "Du bist ein spezialisierter Assistent fuer Wohnungseigentuemer (WEG). "
+        "Deine einzige Wissensquelle ist der unten bereitgestellte Dokumentenkontext.\n\n"
+        "REGELN:\n"
+        "1. Beantworte NUR Fragen, die sich auf den bereitgestellten Kontext beziehen. "
+        "Allgemeine Fragen (Wetter, Politik, etc.) beantworte mit: 'Diese Frage liegt ausserhalb meines Aufgabenbereichs.'\n"
+        "2. Nutze AUSSCHLIESSLICH den Kontext. Rate nicht. Erfinde keine Zahlen oder Daten.\n"
+        "3. Behalte Zahlen, Daten, Betraege und Bezeichnungen exakt wie im Kontext.\n"
+        "4. Wenn Informationen fehlen, nenne sie in missing_info. Antworte trotzdem mit dem, was vorhanden ist.\n"
+        "5. Erklaere Fachbegriffe (juristisch, finanziell) in einfacher Sprache.\n"
+        f"6. Antworte komplett auf {output_language}. Schreibe key_points als knappe, vollstaendige Saetze (max 5 Punkte).\n"
+        "7. Uebersetze DOC/chunk-Bezeichner nicht; sie muessen unveraendert in sources bleiben.\n\n"
+        "Ausgabe ausschliesslich als JSON:\n"
+        "{\"answer\":\"...\",\"key_points\":[\"...\"],\"sources\":[{\"document_id\":0,\"chunk_id\":\"...\"}],\"missing_info\":[\"...\"]}\n"
+        "sources darf nur Labels aus dem bereitgestellten Kontext enthalten."
     )
 
     try:

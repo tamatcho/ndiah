@@ -56,6 +56,9 @@ class Settings:
     FREE_TIER_MAX_DOCUMENTS_PER_PROPERTY: int = int(
         os.getenv("FREE_TIER_MAX_DOCUMENTS_PER_PROPERTY", "50")
     )
+    FREE_TIER_MAX_PROPERTIES_PER_USER: int = int(
+        os.getenv("FREE_TIER_MAX_PROPERTIES_PER_USER", "5")
+    )
     CORS_ORIGINS: list[str] = [
         origin.strip()
         for origin in os.getenv(
@@ -76,6 +79,10 @@ class Settings:
     TIMELINE_EXTRACTION_MAX_ITEMS: int = int(
         os.getenv("TIMELINE_EXTRACTION_MAX_ITEMS", "25")
     )
+    MIN_SIMILARITY_SCORE: float = float(os.getenv("MIN_SIMILARITY_SCORE", "0.35"))
+    PDF_QUALITY_WARN_THRESHOLD: float = float(os.getenv("PDF_QUALITY_WARN_THRESHOLD", "0.3"))
+    CHAT_RATE_LIMIT: str = os.getenv("CHAT_RATE_LIMIT", "10/minute")
+    TIMELINE_RATE_LIMIT: str = os.getenv("TIMELINE_RATE_LIMIT", "10/minute")
 
 
 settings = Settings()

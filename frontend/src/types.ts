@@ -13,12 +13,14 @@ export type DocumentItem = {
   property_id: number;
   filename: string;
   uploaded_at?: string | null;
+  quality_score?: number | null;
 };
 
 export type DocumentStatus = "indexed" | "processing" | "error";
 
 export type ChatMessage = {
-  id: string;
+  id: string;               // client-side UUID (React key / sourceDetails lookup)
+  db_id?: number;           // server-side DB id (present for messages loaded from API)
   role: "user" | "assistant";
   text: string;
   sources?: Source[];
@@ -62,4 +64,15 @@ export type PropertyItem = {
   name: string;
   address_optional?: string | null;
   created_at?: string | null;
+};
+
+export type UploadJob = {
+  job_id: number;
+  property_id: number;
+  status: "pending" | "processing" | "completed" | "failed";
+  processed_count: number;
+  failed_count: number;
+  failed_filenames: string[];
+  created_at: string;
+  updated_at: string;
 };

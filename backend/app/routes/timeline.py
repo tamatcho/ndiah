@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from datetime import datetime, timezone
 import hashlib
 from pydantic import BaseModel
@@ -6,11 +6,13 @@ from sqlalchemy.orm import Session
 from typing import Literal
 
 from ..firebase_auth import get_current_user
+from ..config import settings
 from ..db import get_db
 from ..models import Document, TimelineItem, TimelineItemTranslation, User
 from ..property_access import get_owned_property_or_404
 from ..extractors import extract_timeline
 from ..rag import translate_timeline_fields
+from ..rate_limit import limiter
 from ..timeline_service import extract_and_store_timeline_for_document
 
 router = APIRouter(prefix="/timeline", tags=["timeline"], dependencies=[Depends(get_current_user)])
@@ -134,10 +136,17 @@ def list_timeline(
 
 
 @router.post("/extract")
-def timeline_extract(req: TimelineRequest):
+@limiter.limit(settings.TIMELINE_RATE_LIMIT)
+def timeline_extract(request: Request, req: TimelineRequest):
     raw_text = req.raw_text.strip()
     if not raw_text:
         raise HTTPException(status_code=400, detail="raw_text must not be empty")
+    max_input_chars = settings.TIMELINE_EXTRACTION_INPUT_CHARS * 10
+    if len(raw_text) > max_input_chars:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Text zu lang (max. {max_input_chars:,} Zeichen)."
+        )
 
     try:
         result = extract_timeline(raw_text)
@@ -150,7 +159,9 @@ def timeline_extract(req: TimelineRequest):
 
 
 @router.post("/extract-documents")
+@limiter.limit(settings.TIMELINE_RATE_LIMIT)
 def timeline_extract_documents(
+    request: Request,
     req: TimelineDocumentsRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
@@ -214,7 +225,9 @@ def timeline_extract_documents(
 
 
 @router.post("/rebuild")
+@limiter.limit(settings.TIMELINE_RATE_LIMIT)
 def timeline_rebuild(
+    request: Request,
     property_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
