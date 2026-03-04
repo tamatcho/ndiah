@@ -22,6 +22,10 @@ class Document(Base):
     file_bytes = Column(LargeBinary, nullable=True)
     content_type = Column(String, nullable=True)
     extracted_text = Column(Text, nullable=True)
+    document_type = Column(String, nullable=True, default="sonstiges")
+    summary = Column(Text, nullable=True)
+    financials_json = Column(Text, nullable=True)
+    tax_data_json = Column(Text, nullable=True)
     uploaded_at = Column(DateTime, default=datetime.utcnow)
     quality_score = Column(Float, nullable=True)
 

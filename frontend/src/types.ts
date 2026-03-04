@@ -12,6 +12,10 @@ export type DocumentItem = {
   document_id: number;
   property_id: number;
   filename: string;
+  document_type?: string;
+  summary?: string;
+  financials_json?: string;
+  tax_data_json?: string;
   uploaded_at?: string | null;
   quality_score?: number | null;
 };

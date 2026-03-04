@@ -3,6 +3,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import ChatCard from "./components/cards/ChatCard";
 import TimelineCard from "./components/cards/TimelineCard";
 import UploadCard from "./components/cards/UploadCard";
+import TaxHelpCard from "./components/cards/TaxHelpCard";
 import ToastContainer from "./components/ToastContainer";
 import { ApiError, apiFetch, deleteChatHistory, fetchChatHistory, fetchUploadJobStatus, normalizeApiError, setApiAuthToken, uploadWithProgress } from "./lib/api";
 import { auth } from "./lib/firebase";
@@ -143,8 +144,10 @@ export default function App() {
   const [timelineRenderSeed, setTimelineRenderSeed] = useState(0);
   const [timelineSearch, setTimelineSearch] = useState("");
   const [timelineCategory, setTimelineCategory] = useState("");
-  const [lastChatQuestion, setLastChatQuestion] = useState("");
   const [lastTimelineAction, setLastTimelineAction] = useState<"raw" | "load" | null>(null);
+
+  // New states for the PropPulse specific active tabs
+  const [activeTab, setActiveTab] = useState<"dashboard" | "documents" | "tax" | "assistant">("documents");
 
   const [toasts, setToasts] = useState<Toast[]>([]);
   const chatHistoryRef = useRef<HTMLDivElement>(null);
@@ -581,8 +584,8 @@ export default function App() {
   };
 
   const retryChat = async () => {
-    if (!lastChatQuestion) return;
-    await askChat(lastChatQuestion);
+    if (!chatQuestion) return;
+    await askChat(chatQuestion);
   };
 
   const retryTimeline = async () => {
@@ -804,7 +807,6 @@ export default function App() {
     }
 
     const q = question.trim();
-    setLastChatQuestion(q);
     setChatHistory((prev) => [...prev, { id: uuid(), role: "user", text: q }]);
     setChatQuestion("");
     setChatPending(true);
@@ -932,7 +934,7 @@ export default function App() {
       const { data } = await apiFetch<TimelineItem[]>(
         `${apiBase}/timeline?property_id=${encodeURIComponent(activePropertyId)}&language=${encodeURIComponent(selectedLanguage)}`,
         {
-        timeoutMs: TIMELINE_LIST_TIMEOUT_MS
+          timeoutMs: TIMELINE_LIST_TIMEOUT_MS
         }
       );
       const items = Array.isArray(data) ? data : [];
@@ -1434,80 +1436,130 @@ export default function App() {
               </div>
             </section>
 
-            <section className="layout-main">
-              <div className="layout-left">
-                <UploadCard
-                  disabled={!canWork}
-                  state={uploadState}
-                  message={uploadMessage}
-                  details={uploadDetails}
-                  selectedFilesCount={selectedFiles.length}
-                  uploadErrors={uploadErrors}
-                  uploadPending={uploadPending}
-                  progressVisible={progressVisible}
-                  progressPercent={progressPercent}
-                  progressText={progressText}
-                  uploadOutput={uploadOutput}
-                  documents={documents}
-                  documentStatuses={documentStatuses}
-                  onFiles={addFiles}
-                  onUpload={() => void onUpload()}
-                  onRetry={() => void onUpload()}
-                  onDeleteAllDocuments={() => void onDeleteAllDocuments()}
-                  onDeleteDocument={(doc) => void onDeleteDocument(doc)}
-                  onReprocessDocument={(doc) => void onReprocessDocument(doc)}
-                  actionsPending={documentActionsPending}
-                />
+            <section className="layout-main" style={{ flexDirection: 'row', alignItems: 'flex-start', padding: 0, gap: 0, height: 'calc(100vh - 100px)' }}>
+              {/* Navigation Sidebar */}
+              <div className="w-64 shrink-0 p-4 border-r bg-white flex flex-col gap-4 h-full overflow-y-auto hidden md:flex animate-in slide-in-from-left-4">
+                <div className="px-3">
+                  <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2 mt-4">Ansichten</h3>
+                  <nav className="space-y-1">
+                    <button
+                      onClick={() => setActiveTab("documents")}
+                      className={`w-full flex items-center justify-start gap-3 px-3 py-2 rounded-lg text-sm transition-colors ${activeTab === "documents" ? "bg-brand-50 text-brand-700 font-semibold" : "text-gray-600 hover:bg-gray-50 font-medium"
+                        }`}
+                    >
+                      <svg className="w-5 h-5 opacity-70" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
+                      </svg>
+                      Dokumente
+                    </button>
+                    <button
+                      onClick={() => setActiveTab("tax")}
+                      className={`w-full flex items-center justify-start gap-3 px-3 py-2 rounded-lg text-sm transition-colors ${activeTab === "tax" ? "bg-brand-50 text-brand-700 font-semibold" : "text-gray-600 hover:bg-gray-50 font-medium"
+                        }`}
+                    >
+                      <svg className="w-5 h-5 opacity-70" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" />
+                      </svg>
+                      Steuerhilfe
+                    </button>
+                    <button
+                      onClick={() => setActiveTab("assistant")}
+                      className={`w-full flex items-center justify-start gap-3 px-3 py-2 rounded-lg text-sm transition-colors ${activeTab === "assistant" ? "bg-brand-50 text-brand-700 font-semibold" : "text-gray-600 hover:bg-gray-50 font-medium"
+                        }`}
+                    >
+                      <svg className="w-5 h-5 opacity-70" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z" />
+                      </svg>
+                      Chat
+                    </button>
+                  </nav>
+                </div>
               </div>
 
-              <div className="layout-right">
-                <TimelineCard
-                  disabled={!canWork}
-                  state={timelineState}
-                  message={timelineMessage}
-                  details={timelineDetails}
-                  hasDocuments={documents.length > 0}
-                  timelineItems={timelineItems}
-                  timelineInput={timelineInput}
-                  timelineSearch={timelineSearch}
-                  timelineCategory={timelineCategory}
-                  timelineCategories={timelineCategories}
-                  timelineCurrentGrouped={timelineCurrentGrouped}
-                timelineArchiveGrouped={timelineArchiveGrouped}
-                animationSeed={timelineRenderSeed}
-                pending={timelineState === "loading"}
-                  onInputChange={setTimelineInput}
-                  onExtract={() => void extractTimeline()}
-                  onExtractDocuments={() => void rebuildTimeline()}
-                  onRetry={() => void retryTimeline()}
-                  onSearchChange={setTimelineSearch}
-                  onCategoryChange={setTimelineCategory}
-                  normalizeCategory={normalizeCategory}
-                />
-              </div>
-            </section>
+              <div className="flex-1 h-full overflow-x-hidden overflow-y-auto bg-gray-50 p-4 md:p-6 lg:p-8 flex items-start justify-center">
 
-            <section className="layout-bottom">
-              <ChatCard
-                disabled={!canWork}
-                state={chatState}
-                message={chatMessage}
-                details={chatDetails}
-                chatHistory={chatHistory}
-                chatQuestion={chatQuestion}
-                chatPending={chatPending}
-                hasDocuments={hasDocuments}
-                exampleQuestions={EXAMPLE_QUESTIONS}
-                documentsById={documentsById}
-                onQuestionChange={setChatQuestion}
-                onQuestionKeyDown={onChatQuestionKeyDown}
-                onAsk={() => void askChat(chatQuestion)}
-                onRetry={() => void retryChat()}
-                onUseExample={setChatQuestion}
-                onLoadSnippet={(messageId, source) => void loadSourceSnippet(messageId, source)}
-                onClearHistory={() => void clearChatHistory()}
-                historyRef={chatHistoryRef}
-              />
+                {activeTab === "tax" ? (
+                  <TaxHelpCard documents={documents} />
+                ) : activeTab === "assistant" ? (
+                  <div className="w-full max-w-4xl">
+                    <ChatCard
+                      disabled={!canWork}
+                      state={chatState}
+                      message={chatMessage}
+                      details={chatDetails}
+                      chatHistory={chatHistory}
+                      chatQuestion={chatQuestion}
+                      chatPending={chatPending}
+                      hasDocuments={hasDocuments}
+                      exampleQuestions={EXAMPLE_QUESTIONS}
+                      documentsById={documentsById}
+                      onQuestionChange={setChatQuestion}
+                      onQuestionKeyDown={onChatQuestionKeyDown}
+                      onAsk={() => void askChat(chatQuestion)}
+                      onRetry={() => void retryChat()}
+                      onUseExample={setChatQuestion}
+                      onLoadSnippet={(messageId, source) => void loadSourceSnippet(messageId, source)}
+                      onClearHistory={() => void clearChatHistory()}
+                      historyRef={chatHistoryRef}
+                    />
+                  </div>
+                ) : (
+                  <div className="flex flex-col xl:flex-row gap-6 w-full max-w-6xl">
+                    <div className="flex-1 min-w-0">
+                      <div className="flex flex-col gap-6">
+                        <UploadCard
+                          disabled={!canWork}
+                          state={uploadState}
+                          message={uploadMessage}
+                          details={uploadDetails}
+                          selectedFilesCount={selectedFiles.length}
+                          uploadErrors={uploadErrors}
+                          uploadPending={uploadPending}
+                          progressVisible={progressVisible}
+                          progressPercent={progressPercent}
+                          progressText={progressText}
+                          uploadOutput={uploadOutput}
+                          documents={documents}
+                          documentStatuses={documentStatuses}
+                          onFiles={addFiles}
+                          onUpload={() => void onUpload()}
+                          onRetry={() => void onUpload()}
+                          onDeleteAllDocuments={() => void onDeleteAllDocuments()}
+                          onDeleteDocument={(doc) => void onDeleteDocument(doc)}
+                          onReprocessDocument={(doc) => void onReprocessDocument(doc)}
+                          actionsPending={documentActionsPending}
+                        />
+                      </div>
+                    </div>
+
+                    <div className="w-full xl:w-96 shrink-0">
+                      <TimelineCard
+                        disabled={!canWork}
+                        state={timelineState}
+                        message={timelineMessage}
+                        details={timelineDetails}
+                        hasDocuments={documents.length > 0}
+                        timelineItems={timelineItems}
+                        timelineInput={timelineInput}
+                        timelineSearch={timelineSearch}
+                        timelineCategory={timelineCategory}
+                        timelineCategories={timelineCategories}
+                        timelineCurrentGrouped={timelineCurrentGrouped}
+                        timelineArchiveGrouped={timelineArchiveGrouped}
+                        animationSeed={timelineRenderSeed}
+                        pending={timelineState === "loading"}
+                        onInputChange={setTimelineInput}
+                        onExtract={() => void extractTimeline()}
+                        onExtractDocuments={() => void rebuildTimeline()}
+                        onRetry={() => void retryTimeline()}
+                        onSearchChange={setTimelineSearch}
+                        onCategoryChange={setTimelineCategory}
+                        normalizeCategory={normalizeCategory}
+                      />
+                    </div>
+                  </div>
+                )}
+              </div>
             </section>
           </>
         )}

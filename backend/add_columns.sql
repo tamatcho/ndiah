@@ -1,0 +1,5 @@
+ALTER TABLE documents
+ADD COLUMN IF NOT EXISTS document_type VARCHAR DEFAULT 'sonstiges',
+ADD COLUMN IF NOT EXISTS summary TEXT,
+ADD COLUMN IF NOT EXISTS financials_json TEXT,
+ADD COLUMN IF NOT EXISTS tax_data_json TEXT;

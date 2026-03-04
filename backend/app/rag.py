@@ -83,7 +83,7 @@ def search(query: str, db: Session, user_id: int, property_id: int | None = None
     query_vec = qv[0]
 
     sql = (
-        db.query(Chunk, Document.property_id)
+        db.query(Chunk, Document.property_id, Document.document_type, Document.summary, Document.financials_json, Document.tax_data_json)
         .join(Document, Chunk.document_id == Document.id)
         .join(Property, Document.property_id == Property.id)
         .filter(Property.user_id == user_id)
@@ -96,7 +96,7 @@ def search(query: str, db: Session, user_id: int, property_id: int | None = None
 
     candidates: list[dict] = []
     vectors: list[list[float]] = []
-    for chunk, doc_property_id in rows:
+    for chunk, doc_property_id, doc_type, doc_summary, doc_financials, doc_tax in rows:
         if not chunk.embedding_json:
             continue
         try:
@@ -109,6 +109,9 @@ def search(query: str, db: Session, user_id: int, property_id: int | None = None
                 "property_id": doc_property_id,
                 "chunk_id": chunk.chunk_id,
                 "text": chunk.text,
+                "doc_type": doc_type or "sonstiges",
+                "doc_financials": doc_financials or "{}",
+                "doc_tax": doc_tax or "{}",
             }
         )
     if not candidates:
@@ -152,9 +155,28 @@ def answer_with_context(question: str, contexts: list[dict], language: str = "de
             "missing_info": [fallback_missing],
         }
 
+    # Group chunks by document to avoid repeating the huge JSON strings
+    docs_metadata = {}
+    for c in contexts:
+        doc_id = c['document_id']
+        if doc_id not in docs_metadata:
+            docs_metadata[doc_id] = {
+                "type": c.get("doc_type", "sonstiges"),
+                "financials": c.get("doc_financials", "{}"),
+                "tax": c.get("doc_tax", "{}")
+            }
+
+    metadata_text = "\n\n".join(
+        [f"[METADATA DOC {doc_id} | Typ: {meta['type']}]\nFinanzen: {meta['financials']}\nSteuerdaten: {meta['tax']}" 
+         for doc_id, meta in docs_metadata.items()]
+    )
+
     context_text = "\n\n".join(
         [f"[DOC {c['document_id']} | {c['chunk_id']}]\n{c['text']}" for c in contexts]
     )
+    
+    full_context = f"DOKUMENT-METADATEN (Strukturierte Finanz- und Steuerdaten):\n{metadata_text}\n\nTEXT-AUSZÜGE:\n{context_text}"
+
     allowed_sources = {(int(c["document_id"]), str(c["chunk_id"])) for c in contexts}
     system_prompt = (
         "Du bist ein spezialisierter Assistent fuer Wohnungseigentuemer (WEG). "
@@ -178,7 +200,7 @@ def answer_with_context(question: str, contexts: list[dict], language: str = "de
             model=settings.OPENAI_MODEL,
             messages=[
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"KONTEXT:\n{context_text}\n\nFRAGE:\n{question}"},
+                {"role": "user", "content": f"KONTEXT:\n{full_context}\n\nFRAGE:\n{question}"},
             ],
             response_format={"type": "json_object"},
         )

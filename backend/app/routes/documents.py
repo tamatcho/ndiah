@@ -17,6 +17,7 @@ from ..pdf_ingest import extract_text_and_quality_from_pdf_bytes, extract_text_f
 from ..property_access import get_owned_property_or_404
 from ..rag import upsert_chunks
 from ..timeline_service import extract_and_store_timeline_for_document
+from ..financial_extractor import extract_financial_data
 
 router = APIRouter(prefix="/documents", tags=["documents"], dependencies=[Depends(get_current_user)])
 MAX_ZIP_PDF_FILES = 100
@@ -105,6 +106,13 @@ def _ingest_pdf_content(db: Session, property_obj: Property, filename: str, cont
         upsert_chunks(db, payload)
 
         timeline_items = extract_and_store_timeline_for_document(db, doc, raw_text=text)
+
+        # Extract structured financial and tax metadata
+        financial_metadata = extract_financial_data(text)
+        doc.document_type = financial_metadata.type
+        doc.summary = financial_metadata.summary
+        doc.financials_json = financial_metadata.financials.model_dump_json() if financial_metadata.financials else None
+        doc.tax_data_json = financial_metadata.taxData.model_dump_json() if financial_metadata.taxData else None
 
         db.commit()  # single commit: doc + chunks + timeline together
         logger.info("Ingested PDF property_id=%d filename=%s chunks=%d timeline_items=%d quality=%.3f", property_obj.id, safe_filename, len(payload), len(timeline_items), quality_score)
@@ -247,6 +255,10 @@ def list_documents(
             "document_id": d.id,
             "property_id": d.property_id,
             "filename": d.filename,
+            "document_type": d.document_type,
+            "summary": d.summary,
+            "financials_json": d.financials_json,
+            "tax_data_json": d.tax_data_json,
             "uploaded_at": d.uploaded_at.isoformat() if d.uploaded_at else None,
             "quality_score": d.quality_score,
         }
