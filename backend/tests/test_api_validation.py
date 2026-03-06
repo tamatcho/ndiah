@@ -41,6 +41,7 @@ from app.routes.properties import CreatePropertyBody, PatchPropertyBody, create_
 from app.routes.properties import router as properties_router
 from app.extractors import TimelineExtraction as ParsedTimelineExtraction
 from app.extractors import TimelineItem as ParsedTimelineItem
+from app.rag import translate_timeline_fields
 
 
 class _DummyUpload:
@@ -775,3 +776,51 @@ def test_delete_document_rejects_non_owned_property(auth_db):
     with pytest.raises(HTTPException) as exc:
         delete_document(document_id=doc.id, property_id=property_obj.id, db=auth_db, current_user=other)
     assert exc.value.status_code == 404
+
+
+def test_translate_timeline_fields_fallback_plain_text(monkeypatch):
+    class _Resp:
+        def __init__(self, content: str):
+            self.choices = [type("Choice", (), {"message": type("Message", (), {"content": content})()})()]
+
+    class _Completions:
+        def __init__(self):
+            self.calls = 0
+
+        def create(self, *args, **kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                raise Exception("json_object unsupported")
+            return _Resp("TITLE: Property meeting\nDESCRIPTION: Meeting moved to next week.")
+
+    fake_client = type(
+        "FakeClient",
+        (),
+        {"chat": type("Chat", (), {"completions": _Completions()})()},
+    )()
+
+    monkeypatch.setattr("app.rag.client", fake_client)
+    out = translate_timeline_fields("Eigentuemerversammlung", "Termin wurde verlegt.", "en")
+    assert out["title"] == "Property meeting"
+    assert out["description"] == "Meeting moved to next week."
+
+
+def test_translate_timeline_fields_primary_json(monkeypatch):
+    class _Resp:
+        def __init__(self, content: str):
+            self.choices = [type("Choice", (), {"message": type("Message", (), {"content": content})()})()]
+
+    class _Completions:
+        def create(self, *args, **kwargs):
+            return _Resp('{"title":"Reunion des coproprietaires","description":"Date confirmee."}')
+
+    fake_client = type(
+        "FakeClient",
+        (),
+        {"chat": type("Chat", (), {"completions": _Completions()})()},
+    )()
+
+    monkeypatch.setattr("app.rag.client", fake_client)
+    out = translate_timeline_fields("Eigentuemerversammlung", "Termin bestaetigt.", "fr")
+    assert out["title"] == "Reunion des coproprietaires"
+    assert out["description"] == "Date confirmee."

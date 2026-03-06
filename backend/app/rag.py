@@ -242,23 +242,75 @@ def translate_timeline_fields(title: str, description: str, target_language: str
     )
     payload = {"title": title, "description": description}
 
+    def _parse_translation_payload(content: str) -> dict:
+        normalized = (content or "").strip()
+        if not normalized:
+            raise RuntimeError("Empty translation response")
+
+        if normalized.startswith("```"):
+            normalized = normalized.removeprefix("```json").removeprefix("```").strip()
+            if normalized.endswith("```"):
+                normalized = normalized[:-3].strip()
+
+        try:
+            data = json.loads(normalized)
+            translated = TimelineTextTranslation.model_validate(data)
+            return translated.model_dump()
+        except Exception:
+            pass
+
+        title_match = None
+        desc_match = None
+        for line in normalized.splitlines():
+            lower = line.lower()
+            if lower.startswith("title:"):
+                title_match = line.split(":", 1)[1].strip()
+            elif lower.startswith("description:"):
+                desc_match = line.split(":", 1)[1].strip()
+
+        if title_match is None or desc_match is None:
+            raise RuntimeError("Unparseable translation response")
+
+        translated = TimelineTextTranslation(title=title_match, description=desc_match)
+        return translated.model_dump()
+
+    primary_error: Exception | None = None
     try:
         resp = client.chat.completions.create(
-            model=settings.OPENAI_MODEL,
+            model=settings.TIMELINE_TRANSLATION_MODEL,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
             ],
             response_format={"type": "json_object"},
-            temperature=0,
         )
+        content = (resp.choices[0].message.content or "").strip()
+        return _parse_translation_payload(content)
     except Exception as e:
-        raise RuntimeError("Timeline translation request to OpenAI failed") from e
+        primary_error = e
+
+    # Fallback for models/endpoints that do not reliably support json_object translation mode.
+    fallback_prompt = (
+        f"Translate the following JSON from German to {target_label}. "
+        "Return exactly two lines:\n"
+        "TITLE: <translated title>\n"
+        "DESCRIPTION: <translated description>\n"
+        "No extra text."
+    )
 
     try:
-        content = (resp.choices[0].message.content or "").strip()
-        data = json.loads(content)
-        translated = TimelineTextTranslation.model_validate(data)
-        return translated.model_dump()
+        fallback = client.chat.completions.create(
+            model=settings.TIMELINE_TRANSLATION_MODEL,
+            messages=[
+                {"role": "system", "content": fallback_prompt},
+                {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+            ],
+        )
+        fallback_content = (fallback.choices[0].message.content or "").strip()
+        return _parse_translation_payload(fallback_content)
     except Exception as e:
-        raise RuntimeError("Timeline translation response parsing failed") from e
+        if primary_error is not None:
+            raise RuntimeError(
+                f"Timeline translation failed (primary={type(primary_error).__name__}, fallback={type(e).__name__})"
+            ) from e
+        raise RuntimeError("Timeline translation failed") from e

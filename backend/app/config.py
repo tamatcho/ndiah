@@ -43,6 +43,7 @@ class Settings:
     ENV: str = os.getenv("ENV", "DEV").upper()
     OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
     OPENAI_MODEL: str = os.getenv("OPENAI_MODEL", "gpt-5-nano")
+    TIMELINE_TRANSLATION_MODEL: str = os.getenv("TIMELINE_TRANSLATION_MODEL", OPENAI_MODEL)
     EMBED_MODEL: str = os.getenv("EMBED_MODEL", "text-embedding-3-small")
     STORAGE_DIR: str = os.getenv("STORAGE_DIR", str(BASE_DIR / "storage"))
     UPLOAD_DIR: str = os.getenv("UPLOAD_DIR", str(BASE_DIR / "storage" / "uploads"))
