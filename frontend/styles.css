@@ -1076,6 +1076,7 @@ select:focus-visible {
   margin-top: 10px;
   display: grid;
   gap: 10px;
+  min-width: 0;
 }
 
 .timeline-section {
@@ -1213,6 +1214,7 @@ select:focus-visible {
   display: grid;
   gap: 8px;
   padding: 8px;
+  min-width: 0;
 }
 
 .timeline-card {
@@ -1220,6 +1222,8 @@ select:focus-visible {
   border-radius: 10px;
   background: #fff;
   padding: 10px;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .timeline-card-archived {
@@ -1261,6 +1265,7 @@ select:focus-visible {
   min-width: 0;
   flex: 1 1 auto;
   word-break: break-word;
+  overflow-wrap: anywhere;
 }
 
 .timeline-card-archived .timeline-title {
@@ -1275,6 +1280,8 @@ select:focus-visible {
   display: flex;
   gap: 8px;
   flex-wrap: wrap;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .timeline-card-archived .timeline-meta {
@@ -1285,6 +1292,7 @@ select:focus-visible {
   margin-top: 8px;
   white-space: pre-wrap;
   word-break: break-word;
+  overflow-wrap: anywhere;
   font-size: 0.9rem;
 }
 
@@ -1302,6 +1310,10 @@ select:focus-visible {
 .timeline-source {
   font-size: 0.78rem;
   color: var(--muted);
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .timeline-card-archived .timeline-source {
@@ -1311,9 +1323,10 @@ select:focus-visible {
 .timeline-footer {
   margin-top: 6px;
   display: flex;
-  align-items: flex-end;
+  align-items: flex-start;
   justify-content: space-between;
   gap: 10px;
+  min-width: 0;
 }
 
 .timeline-quote-toggle {
