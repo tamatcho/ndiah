@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 from ..firebase_auth import get_current_user
 from ..config import settings
 from ..db import get_db
-from ..models import ChatMessage, Chunk, Document, Property, TimelineItem, UploadJob, User
+from ..models import ChatMessage, Chunk, Document, Property, TimelineItem, TimelineItemTranslation, UploadJob, User
 from ..property_access import get_owned_property_or_404
 
 router = APIRouter(prefix="/properties", tags=["properties"], dependencies=[Depends(get_current_user)])
@@ -132,6 +132,14 @@ def delete_property(
         doc_ids = [d.id for d in db.query(Document.id).filter(Document.property_id == property_obj.id).all()]
         if doc_ids:
             db.query(Chunk).filter(Chunk.document_id.in_(doc_ids)).delete(synchronize_session=False)
+            timeline_item_ids = [
+                row.id
+                for row in db.query(TimelineItem.id).filter(TimelineItem.document_id.in_(doc_ids)).all()
+            ]
+            if timeline_item_ids:
+                db.query(TimelineItemTranslation).filter(
+                    TimelineItemTranslation.timeline_item_id.in_(timeline_item_ids)
+                ).delete(synchronize_session=False)
             db.query(TimelineItem).filter(TimelineItem.document_id.in_(doc_ids)).delete(synchronize_session=False)
             db.query(Document).filter(Document.id.in_(doc_ids)).delete(synchronize_session=False)
         db.query(UploadJob).filter(UploadJob.property_id == property_obj.id).delete(synchronize_session=False)

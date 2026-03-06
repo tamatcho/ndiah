@@ -39,6 +39,8 @@ from app.routes.documents import upload_pdf, documents_status, get_source_snippe
 from app.routes.documents import router as documents_router
 from app.routes.properties import CreatePropertyBody, PatchPropertyBody, create_property, delete_property, get_property_details, list_properties, update_property
 from app.routes.properties import router as properties_router
+from app.extractors import TimelineExtraction as ParsedTimelineExtraction
+from app.extractors import TimelineItem as ParsedTimelineItem
 
 
 class _DummyUpload:
@@ -449,10 +451,21 @@ def test_properties_delete_removes_property_and_all_data(auth_db):
     auth_db.refresh(doc)
     doc_id = doc.id  # save before delete
     auth_db.add(Chunk(document_id=doc_id, chunk_id=f"{doc_id}-0", text="txt", embedding_json=None))
-    auth_db.add(TimelineItem(
+    timeline_item = TimelineItem(
         document_id=doc_id, property_id=prop.id, title="T", date_iso="2026-01-01",
         time_24h=None, category="info", amount_eur=None, description="D",
-    ))
+    )
+    auth_db.add(timeline_item)
+    auth_db.flush()
+    auth_db.add(
+        TimelineItemTranslation(
+            timeline_item_id=timeline_item.id,
+            language="en",
+            translated_title="T",
+            translated_description="D",
+            source_fingerprint="fingerprint",
+        )
+    )
     auth_db.add(ChatMessage(user_id=user.id, property_id=prop.id, role="user", text="Q"))
     auth_db.commit()
 
@@ -462,6 +475,7 @@ def test_properties_delete_removes_property_and_all_data(auth_db):
     assert auth_db.query(Document).filter(Document.property_id == prop.id).count() == 0
     assert auth_db.query(Chunk).filter(Chunk.document_id == doc_id).count() == 0
     assert auth_db.query(TimelineItem).filter(TimelineItem.property_id == prop.id).count() == 0
+    assert auth_db.query(TimelineItemTranslation).count() == 0
     assert auth_db.query(ChatMessage).filter(ChatMessage.property_id == prop.id).count() == 0
 
 
@@ -641,6 +655,62 @@ def test_timeline_rebuild_continues_when_single_document_extraction_fails(auth_d
     assert res["documents_failed"][0]["reason"] == "Timeline extraction response parsing failed"
 
 
+def test_timeline_rebuild_deletes_old_translations_before_replacing_items(auth_db, monkeypatch):
+    user = _seed_user(auth_db, "rebuild-fk-fix@example.com")
+    property_obj = _seed_property(auth_db, user.id, "RebuildFKFix")
+    doc = Document(property_id=property_obj.id, filename="a.pdf", path=None, extracted_text="x")
+    auth_db.add(doc)
+    auth_db.commit()
+    auth_db.refresh(doc)
+
+    old_item = TimelineItem(
+        document_id=doc.id,
+        property_id=property_obj.id,
+        title="Old",
+        date_iso="2026-01-01",
+        time_24h=None,
+        category="info",
+        amount_eur=None,
+        description="Old desc",
+    )
+    auth_db.add(old_item)
+    auth_db.flush()
+    auth_db.add(
+        TimelineItemTranslation(
+            timeline_item_id=old_item.id,
+            language="fr",
+            translated_title="Ancien",
+            translated_description="Ancien desc",
+            source_fingerprint="old-fingerprint",
+        )
+    )
+    auth_db.commit()
+
+    def fake_extract_timeline(_text):
+        return ParsedTimelineExtraction(
+            items=[
+                ParsedTimelineItem(
+                    title="New",
+                    date_iso="2026-02-01",
+                    time_24h=None,
+                    category="deadline",
+                    amount_eur=None,
+                    description="New desc",
+                    source_quote="New quote",
+                )
+            ]
+        )
+
+    monkeypatch.setattr("app.timeline_service.extract_timeline", fake_extract_timeline)
+    res = timeline_rebuild(request=_make_request(), property_id=property_obj.id, db=auth_db, current_user=user)
+    assert res["documents_processed"] == 1
+    assert res["documents_failed"] == []
+    assert auth_db.query(TimelineItemTranslation).count() == 0
+    new_items = auth_db.query(TimelineItem).filter(TimelineItem.document_id == doc.id).all()
+    assert len(new_items) == 1
+    assert new_items[0].title == "New"
+
+
 def test_timeline_rebuild_all_failed_returns_detail_with_document_reason(auth_db, monkeypatch):
     user = _seed_user(auth_db, "rebuild-all-fail@example.com")
     property_obj = _seed_property(auth_db, user.id, "RebuildAllFail")
@@ -670,16 +740,28 @@ def test_delete_document_removes_document_chunks_and_timeline(auth_db):
     auth_db.commit()
     auth_db.refresh(doc)
     auth_db.add(Chunk(document_id=doc.id, chunk_id=f"{doc.id}-0", text="hello", embedding_json=None))
-    auth_db.add(TimelineItem(
+    timeline_item = TimelineItem(
         document_id=doc.id, property_id=property_obj.id, title="A item",
         date_iso="2026-01-01", time_24h="10:00", category="info", amount_eur=None, description="A",
-    ))
+    )
+    auth_db.add(timeline_item)
+    auth_db.flush()
+    auth_db.add(
+        TimelineItemTranslation(
+            timeline_item_id=timeline_item.id,
+            language="en",
+            translated_title="A item",
+            translated_description="A",
+            source_fingerprint="fingerprint-a",
+        )
+    )
     auth_db.commit()
     res = delete_document(document_id=doc.id, property_id=property_obj.id, db=auth_db, current_user=user)
     assert res["ok"] is True
     assert res["deleted_chunks"] == 1
     assert res["deleted_timeline_items"] == 1
     assert auth_db.query(Document).filter(Document.id == doc.id).first() is None
+    assert auth_db.query(TimelineItemTranslation).count() == 0
 
 
 def test_delete_document_rejects_non_owned_property(auth_db):

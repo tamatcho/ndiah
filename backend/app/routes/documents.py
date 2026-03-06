@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 from ..firebase_auth import get_current_user
 from ..config import settings
 from ..db import get_db, SessionLocal
-from ..models import Chunk, Document, Property, TimelineItem, UploadJob, User
+from ..models import Chunk, Document, Property, TimelineItem, TimelineItemTranslation, UploadJob, User
 from ..pdf_ingest import extract_text_and_quality_from_pdf_bytes, extract_text_from_pdf_bytes, simple_chunk
 from ..property_access import get_owned_property_or_404
 from ..rag import upsert_chunks
@@ -417,6 +417,14 @@ def delete_document(
             .filter(Chunk.document_id == doc.id)
             .delete(synchronize_session=False)
         )
+        timeline_item_ids = [
+            row.id
+            for row in db.query(TimelineItem.id).filter(TimelineItem.document_id == doc.id).all()
+        ]
+        if timeline_item_ids:
+            db.query(TimelineItemTranslation).filter(
+                TimelineItemTranslation.timeline_item_id.in_(timeline_item_ids)
+            ).delete(synchronize_session=False)
         deleted_timeline_items = (
             db.query(TimelineItem)
             .filter(TimelineItem.document_id == doc.id)

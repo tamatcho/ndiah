@@ -1,7 +1,7 @@
 from sqlalchemy.orm import Session
 
 from .extractors import extract_timeline
-from .models import Document, TimelineItem
+from .models import Document, TimelineItem, TimelineItemTranslation
 from .pdf_ingest import extract_text_from_pdf, extract_text_from_pdf_bytes
 
 
@@ -49,9 +49,15 @@ def extract_and_store_timeline_for_document(
             if (item["date_iso"], item["title"].strip().lower()) not in existing_keys
         ]
 
-    db.query(TimelineItem).filter(TimelineItem.document_id == doc.id).delete(
-        synchronize_session=False
-    )
+    existing_timeline_item_ids = [
+        row.id
+        for row in db.query(TimelineItem.id).filter(TimelineItem.document_id == doc.id).all()
+    ]
+    if existing_timeline_item_ids:
+        db.query(TimelineItemTranslation).filter(
+            TimelineItemTranslation.timeline_item_id.in_(existing_timeline_item_ids)
+        ).delete(synchronize_session=False)
+    db.query(TimelineItem).filter(TimelineItem.document_id == doc.id).delete(synchronize_session=False)
     if items:
         db.add_all(
             [
