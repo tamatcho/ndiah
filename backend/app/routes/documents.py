@@ -79,7 +79,7 @@ def _ingest_pdf_content(db: Session, property_obj: Property, filename: str, cont
         property_id=property_obj.id,
         filename=safe_filename,
         path=None,
-        file_bytes=content,
+        file_bytes=None,  # not persisted — text is extracted immediately into extracted_text
         content_type="application/pdf",
     )
     try:

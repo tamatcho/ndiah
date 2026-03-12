@@ -9,6 +9,7 @@ from sqlalchemy import (
     LargeBinary,
     UniqueConstraint,
 )
+from sqlalchemy.orm import deferred
 from datetime import datetime
 from .db import Base
 
@@ -19,9 +20,10 @@ class Document(Base):
     property_id = Column(Integer, ForeignKey("properties.id"), index=True, nullable=False)
     filename = Column(String, nullable=False)
     path = Column(String, nullable=True)
-    file_bytes = Column(LargeBinary, nullable=True)
+    # deferred: never loaded automatically — only fetched when explicitly accessed
+    file_bytes = deferred(Column(LargeBinary, nullable=True))
     content_type = Column(String, nullable=True)
-    extracted_text = Column(Text, nullable=True)
+    extracted_text = deferred(Column(Text, nullable=True))
     document_type = Column(String, nullable=True, default="sonstiges")
     summary = Column(Text, nullable=True)
     financials_json = Column(Text, nullable=True)
@@ -35,7 +37,8 @@ class Chunk(Base):
     document_id = Column(Integer, ForeignKey("documents.id"), index=True, nullable=False)
     chunk_id = Column(String, index=True)
     text = Column(Text, nullable=False)
-    embedding_json = Column(Text, nullable=True)
+    # deferred: only loaded during RAG search, not during listing or status checks
+    embedding_json = deferred(Column(Text, nullable=True))
 
 
 class TimelineItem(Base):
