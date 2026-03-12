@@ -195,6 +195,23 @@ export default function UploadCard(props: Props) {
                         <span className="doc-details-key">Hochgeladen</span>
                         <span>{doc.uploaded_at ? new Date(doc.uploaded_at).toLocaleString("de-DE") : "-"}</span>
                       </div>
+                      {doc.document_type ? (
+                        <div className="doc-details-row">
+                          <span className="doc-details-key">Typ</span>
+                          <span>{doc.document_type}</span>
+                        </div>
+                      ) : null}
+                      {doc.summary && doc.summary !== "Extraktion fehlgeschlagen." ? (
+                        <div className="doc-details-row">
+                          <span className="doc-details-key">Zusammenfassung</span>
+                          <span style={{ whiteSpace: "pre-wrap" }}>{doc.summary}</span>
+                        </div>
+                      ) : doc.summary === "Extraktion fehlgeschlagen." ? (
+                        <div className="doc-details-row">
+                          <span className="doc-details-key">Zusammenfassung</span>
+                          <span style={{ color: "var(--color-warning, #b45309)" }}>Extraktion fehlgeschlagen</span>
+                        </div>
+                      ) : null}
                     </div>
                   ) : null}
                 </div>

@@ -922,9 +922,14 @@ select:focus-visible {
 
 .doc-details-row {
   display: flex;
-  align-items: center;
+  align-items: start;
   justify-content: space-between;
   gap: 8px;
+}
+
+.doc-details-row span:last-child {
+  text-align: right;
+  word-break: break-word;
 }
 
 .doc-details-key {
@@ -1381,11 +1386,8 @@ select:focus-visible {
   margin-top: 3px;
   font-size: 0.82rem;
   color: #667188;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .badge {

@@ -84,6 +84,7 @@ class Settings:
     PDF_QUALITY_WARN_THRESHOLD: float = float(os.getenv("PDF_QUALITY_WARN_THRESHOLD", "0.3"))
     CHAT_RATE_LIMIT: str = os.getenv("CHAT_RATE_LIMIT", "10/minute")
     TIMELINE_RATE_LIMIT: str = os.getenv("TIMELINE_RATE_LIMIT", "10/minute")
+    UPLOAD_RATE_LIMIT: str = os.getenv("UPLOAD_RATE_LIMIT", "20/minute")
 
 
 settings = Settings()

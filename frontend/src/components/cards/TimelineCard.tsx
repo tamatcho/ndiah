@@ -53,6 +53,14 @@ export default function TimelineCard(props: Props) {
     return 4; // tax
   };
 
+  const categoryLabel: Record<string, string> = {
+    deadline: "Frist",
+    payment: "Zahlung",
+    meeting: "Termin",
+    info: "Info",
+    tax: "Steuer",
+  };
+
   const shouldAnimateBatch =
     lastAnimatedSeed !== props.animationSeed &&
     !((window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches) ?? false);
@@ -97,7 +105,7 @@ export default function TimelineCard(props: Props) {
                   <div className="timeline-card-head">
                     <div className="timeline-title">{item.title || "Ohne Titel"}</div>
                     <span className={`badge badge-${props.normalizeCategory(item.category || "info")}`}>
-                      {props.normalizeCategory(item.category || "info")}
+                      {categoryLabel[props.normalizeCategory(item.category || "info")] ?? props.normalizeCategory(item.category || "info")}
                     </span>
                   </div>
                   <div className="timeline-meta">
@@ -242,6 +250,29 @@ export default function TimelineCard(props: Props) {
     setOpenQuoteId((current) => (current === id ? null : id));
   };
 
+  const exportTimelineCsv = () => {
+    if (props.timelineItems.length === 0) return;
+    const headers = ["Datum", "Uhrzeit", "Titel", "Kategorie", "Betrag (EUR)", "Beschreibung", "Quelle", "Beleg"];
+    const rows = props.timelineItems.map((item) => [
+      item.date_iso || "",
+      item.time_24h || "",
+      item.title || "",
+      props.normalizeCategory(item.category || "info"),
+      item.amount_eur != null ? item.amount_eur.toFixed(2) : "",
+      item.description || "",
+      item.source || item.filename || "",
+      (item.source_quote || "").replace(/\n/g, " "),
+    ]);
+    const csvContent = [headers, ...rows].map((row) => row.map((cell) => `"${String(cell).replace(/"/g, '""')}"`).join(";")).join("\n");
+    const blob = new Blob(["\uFEFF" + csvContent], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `ndiah_timeline_${new Date().toISOString().slice(0, 10)}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
   return (
     <section id="timelineCard" className="card reveal" data-state={props.state}>
       <div className="card-title-row">
@@ -262,6 +293,11 @@ export default function TimelineCard(props: Props) {
             <button className="btn btn-secondary" onClick={props.onExtractDocuments} disabled={props.disabled || !props.hasDocuments || props.pending}>
               Timeline aktualisieren
             </button>
+            {props.timelineItems.length > 0 ? (
+              <button className="chip" onClick={exportTimelineCsv} disabled={props.pending}>
+                CSV exportieren
+              </button>
+            ) : null}
           </div>
           {!props.hasDocuments ? (
             <div className="timeline-hint">

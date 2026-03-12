@@ -69,6 +69,7 @@ def chat(
 def chat_history(
     property_id: int | None = None,
     limit: int = 100,
+    offset: int = 0,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -79,7 +80,7 @@ def chat_history(
         query = query.filter(ChatMessage.property_id == property_id)
     else:
         query = query.filter(ChatMessage.property_id.is_(None))
-    messages = query.order_by(ChatMessage.created_at.asc()).limit(max(1, min(limit, 500))).all()
+    messages = query.order_by(ChatMessage.created_at.asc()).offset(max(0, offset)).limit(max(1, min(limit, 500))).all()
     return [
         {
             "id": m.id,

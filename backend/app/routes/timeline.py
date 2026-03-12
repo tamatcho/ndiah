@@ -1,6 +1,9 @@
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import StreamingResponse
 from datetime import datetime, timezone
+import csv
 import hashlib
+import io
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from typing import Literal
@@ -8,7 +11,7 @@ from typing import Literal
 from ..firebase_auth import get_current_user
 from ..config import settings
 from ..db import get_db
-from ..models import Document, TimelineItem, TimelineItemTranslation, User
+from ..models import Document, Property, TimelineItem, TimelineItemTranslation, User
 from ..property_access import get_owned_property_or_404
 from ..extractors import extract_timeline
 from ..rag import translate_timeline_fields
@@ -47,20 +50,34 @@ class TimelineDocumentsRequest(BaseModel):
     document_ids: list[int] | None = None
 
 
+class TimelineItemPatch(BaseModel):
+    title: str | None = None
+    description: str | None = None
+    date_iso: str | None = None
+    time_24h: str | None = None
+    category: str | None = None
+    amount_eur: float | None = None
+
+
 @router.get("")
 def list_timeline(
     property_id: int,
     document_id: int | None = None,
     language: Literal["de", "en", "fr"] = "de",
+    offset: int = 0,
+    limit: int = 500,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     get_owned_property_or_404(db, current_user.id, property_id)
-    query = db.query(TimelineItem, Document).join(Document, TimelineItem.document_id == Document.id)
-    query = query.filter(TimelineItem.property_id == property_id, Document.property_id == property_id)
+    base_query = db.query(TimelineItem, Document).join(Document, TimelineItem.document_id == Document.id)
+    base_query = base_query.filter(TimelineItem.property_id == property_id, Document.property_id == property_id)
     if document_id is not None:
-        query = query.filter(TimelineItem.document_id == document_id)
-    rows = query.order_by(TimelineItem.date_iso.asc(), TimelineItem.time_24h.asc(), TimelineItem.id.asc()).all()
+        base_query = base_query.filter(TimelineItem.document_id == document_id)
+    ordered = base_query.order_by(TimelineItem.date_iso.asc(), TimelineItem.time_24h.asc(), TimelineItem.id.asc())
+    safe_offset = max(0, offset)
+    safe_limit = max(1, min(limit, 1000))
+    rows = ordered.offset(safe_offset).limit(safe_limit).all()
 
     if language not in SUPPORTED_TIMELINE_LANGUAGES:
         raise HTTPException(status_code=400, detail="Unsupported language. Use one of: de, en, fr")
@@ -250,6 +267,103 @@ def timeline_extract_documents(
         "documents_considered": len(docs),
         "documents_processed": processed_documents,
         "documents_failed": failed_documents,
+    }
+
+
+@router.get("/export")
+def export_timeline_csv(
+    property_id: int,
+    document_id: int | None = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    get_owned_property_or_404(db, current_user.id, property_id)
+    query = db.query(TimelineItem, Document).join(Document, TimelineItem.document_id == Document.id)
+    query = query.filter(TimelineItem.property_id == property_id, Document.property_id == property_id)
+    if document_id is not None:
+        query = query.filter(TimelineItem.document_id == document_id)
+    rows = query.order_by(TimelineItem.date_iso.asc(), TimelineItem.time_24h.asc(), TimelineItem.id.asc()).all()
+
+    def generate():
+        output = io.StringIO()
+        writer = csv.writer(output, delimiter=";", quoting=csv.QUOTE_ALL)
+        writer.writerow(["Datum", "Uhrzeit", "Titel", "Kategorie", "Betrag (EUR)", "Beschreibung", "Quelle", "Beleg"])
+        yield output.getvalue()
+        for item, doc in rows:
+            output = io.StringIO()
+            writer = csv.writer(output, delimiter=";", quoting=csv.QUOTE_ALL)
+            writer.writerow([
+                item.date_iso or "",
+                item.time_24h or "",
+                item.title or "",
+                item.category or "",
+                f"{item.amount_eur:.2f}" if item.amount_eur is not None else "",
+                item.description or "",
+                doc.filename or "",
+                (item.source_quote or "").replace("\n", " "),
+            ])
+            yield output.getvalue()
+
+    filename = f"ndiah_timeline_property{property_id}.csv"
+    return StreamingResponse(
+        generate(),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.patch("/{timeline_item_id}")
+def update_timeline_item(
+    timeline_item_id: int,
+    patch: TimelineItemPatch,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    item = (
+        db.query(TimelineItem)
+        .join(Document, TimelineItem.document_id == Document.id)
+        .join(Property, Document.property_id == Property.id)
+        .filter(TimelineItem.id == timeline_item_id, Property.user_id == current_user.id)
+        .first()
+    )
+    if not item:
+        raise HTTPException(status_code=404, detail="Timeline-Eintrag nicht gefunden")
+
+    VALID_CATEGORIES = {"deadline", "payment", "meeting", "info"}
+    if patch.title is not None:
+        item.title = patch.title.strip()
+    if patch.description is not None:
+        item.description = patch.description.strip()
+    if patch.date_iso is not None:
+        item.date_iso = patch.date_iso.strip()
+    if patch.time_24h is not None:
+        item.time_24h = patch.time_24h.strip() or None
+    if patch.category is not None:
+        cat = patch.category.strip().lower()
+        if cat not in VALID_CATEGORIES:
+            raise HTTPException(status_code=400, detail=f"Ungültige Kategorie. Erlaubt: {', '.join(VALID_CATEGORIES)}")
+        item.category = cat
+    if patch.amount_eur is not None:
+        item.amount_eur = patch.amount_eur
+
+    try:
+        db.commit()
+        db.refresh(item)
+    except Exception:
+        db.rollback()
+        raise HTTPException(status_code=500, detail="Aktualisierung fehlgeschlagen")
+
+    return {
+        "timeline_item_id": item.id,
+        "property_id": item.property_id,
+        "document_id": item.document_id,
+        "title": item.title,
+        "date_iso": item.date_iso,
+        "time_24h": item.time_24h,
+        "category": item.category,
+        "amount_eur": item.amount_eur,
+        "description": item.description,
+        "source_quote": item.source_quote,
     }
 
 

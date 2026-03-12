@@ -4,7 +4,7 @@ import re
 import io
 import json
 import zipfile
-from fastapi import APIRouter, UploadFile, File, Depends, HTTPException, Form, BackgroundTasks
+from fastapi import APIRouter, UploadFile, File, Depends, HTTPException, Form, BackgroundTasks, Request
 from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
@@ -13,9 +13,10 @@ from ..firebase_auth import get_current_user
 from ..config import settings
 from ..db import get_db, SessionLocal
 from ..models import Chunk, Document, Property, TimelineItem, TimelineItemTranslation, UploadJob, User
-from ..pdf_ingest import extract_text_and_quality_from_pdf_bytes, extract_text_from_pdf_bytes, simple_chunk
+from ..pdf_ingest import extract_text_and_quality_from_pdf_bytes, simple_chunk
 from ..property_access import get_owned_property_or_404
 from ..rag import upsert_chunks
+from ..rate_limit import limiter
 from ..timeline_service import extract_and_store_timeline_for_document
 from ..financial_extractor import extract_financial_data
 
@@ -109,13 +110,14 @@ def _ingest_pdf_content(db: Session, property_obj: Property, filename: str, cont
 
         # Extract structured financial and tax metadata
         financial_metadata = extract_financial_data(text)
+        financial_extraction_failed = financial_metadata.summary == "Extraktion fehlgeschlagen."
         doc.document_type = financial_metadata.type
         doc.summary = financial_metadata.summary
         doc.financials_json = financial_metadata.financials.model_dump_json() if financial_metadata.financials else None
         doc.tax_data_json = financial_metadata.taxData.model_dump_json() if financial_metadata.taxData else None
 
         db.commit()  # single commit: doc + chunks + timeline together
-        logger.info("Ingested PDF property_id=%d filename=%s chunks=%d timeline_items=%d quality=%.3f", property_obj.id, safe_filename, len(payload), len(timeline_items), quality_score)
+        logger.info("Ingested PDF property_id=%d filename=%s chunks=%d timeline_items=%d quality=%.3f financial_ok=%s", property_obj.id, safe_filename, len(payload), len(timeline_items), quality_score, not financial_extraction_failed)
     except HTTPException:
         db.rollback()
         raise
@@ -136,6 +138,7 @@ def _ingest_pdf_content(db: Session, property_obj: Property, filename: str, cont
         "chunks_indexed": len(payload),
         "timeline_items_upserted": len(timeline_items),
         "quality_score": quality_score,
+        "document_type": doc.document_type,
     }
     if quality_score < settings.PDF_QUALITY_WARN_THRESHOLD:
         result["low_quality"] = True
@@ -143,6 +146,11 @@ def _ingest_pdf_content(db: Session, property_obj: Property, filename: str, cont
             f"PDF-Qualität niedrig (Score: {quality_score:.2f}). "
             "Das Dokument enthält möglicherweise hauptsächlich Bilder ohne erkannten Text. "
             "Antworten und Timeline könnten unvollständig sein."
+        )
+    if financial_extraction_failed:
+        result["financial_extraction_warning"] = (
+            "Finanz- und Steuerdaten konnten nicht extrahiert werden. "
+            "Das Dokument wurde trotzdem vollständig indiziert."
         )
     return result
 
@@ -300,7 +308,9 @@ def get_source_snippet(
 
 
 @router.post("/upload")
+@limiter.limit(settings.UPLOAD_RATE_LIMIT)
 async def upload_pdf(
+    request: Request,
     property_id: int = Form(...),
     file: UploadFile = File(...),
     background_tasks: BackgroundTasks = None,
