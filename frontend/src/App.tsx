@@ -154,7 +154,6 @@ export default function App() {
 
   const [toasts, setToasts] = useState<Toast[]>([]);
   const chatHistoryRef = useRef<HTMLDivElement>(null);
-  const lastProfileLanguageSyncRef = useRef<string>("");
   const isLocalDev = window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1";
 
   useEffect(() => {
@@ -202,35 +201,6 @@ export default function App() {
     return unsubscribe;
   }, [authListenerReady]);
 
-  useEffect(() => {
-    if (!currentUser) {
-      lastProfileLanguageSyncRef.current = "";
-      return;
-    }
-    const syncMarker = `${currentUser.id}:${selectedLanguage}`;
-    if (lastProfileLanguageSyncRef.current === syncMarker) return;
-    lastProfileLanguageSyncRef.current = syncMarker;
-    let cancelled = false;
-
-    const syncProfileLanguage = async () => {
-      try {
-        await apiFetch(`${apiBase}/auth/me`, {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ preferred_language: selectedLanguage }),
-          timeoutMs: 8000
-        });
-      } catch (e) {
-        if (cancelled) return;
-        if (e instanceof ApiError && (e.status === 404 || e.status === 405 || e.status === 422)) return;
-      }
-    };
-
-    void syncProfileLanguage();
-    return () => {
-      cancelled = true;
-    };
-  }, [apiBase, currentUser, selectedLanguage]);
 
   useEffect(() => {
     if (activePropertyId == null) {

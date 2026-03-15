@@ -177,13 +177,19 @@ def answer_with_context(question: str, contexts: list[dict], language: str = "de
     
     full_context = f"DOKUMENT-METADATEN (Strukturierte Finanz- und Steuerdaten):\n{metadata_text}\n\nTEXT-AUSZÜGE:\n{context_text}"
 
+    out_of_scope_phrase = {
+        "de": "Diese Frage liegt ausserhalb meines Aufgabenbereichs.",
+        "en": "This question is outside my area of responsibility.",
+        "fr": "Cette question est en dehors de mon domaine de responsabilite.",
+    }.get(language, "Diese Frage liegt ausserhalb meines Aufgabenbereichs.")
+
     allowed_sources = {(int(c["document_id"]), str(c["chunk_id"])) for c in contexts}
     system_prompt = (
         "Du bist ein spezialisierter Assistent fuer Wohnungseigentuemer (WEG). "
         "Deine einzige Wissensquelle ist der unten bereitgestellte Dokumentenkontext.\n\n"
         "REGELN:\n"
         "1. Beantworte NUR Fragen, die sich auf den bereitgestellten Kontext beziehen. "
-        "Allgemeine Fragen (Wetter, Politik, etc.) beantworte mit: 'Diese Frage liegt ausserhalb meines Aufgabenbereichs.'\n"
+        f"Allgemeine Fragen (Wetter, Politik, etc.) beantworte mit: '{out_of_scope_phrase}'\n"
         "2. Nutze AUSSCHLIESSLICH den Kontext. Rate nicht. Erfinde keine Zahlen oder Daten.\n"
         "3. Behalte Zahlen, Daten, Betraege und Bezeichnungen exakt wie im Kontext.\n"
         "4. Wenn Informationen fehlen, nenne sie in missing_info. Antworte trotzdem mit dem, was vorhanden ist.\n"
