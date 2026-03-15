@@ -1433,7 +1433,7 @@ export default function App() {
                 </div>
               </div>
 
-              <div className="flex-1 h-full overflow-x-hidden overflow-y-auto bg-gray-50 p-4 md:p-6 lg:p-8 flex items-start justify-center">
+              <div className="flex-1 h-full overflow-x-hidden overflow-y-auto bg-gray-50 p-4 md:p-6 lg:p-8 flex flex-col items-center">
                 <div className="w-full md:hidden mb-4">
                   <ViewTabs
                     activeTab={activeTab}
