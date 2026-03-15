@@ -20,6 +20,7 @@ type Props = {
   onInputChange: (value: string) => void;
   onExtract: () => void;
   onExtractDocuments: () => void;
+  onLoadFromStore: () => void;
   onRetry: () => void;
   onSearchChange: (value: string) => void;
   onCategoryChange: (value: string) => void;
@@ -290,8 +291,11 @@ export default function TimelineCard(props: Props) {
         <div className="timeline-sticky-header">
           <StatusBanner state={props.state} message={props.message} details={props.details} />
           <div className="row wrap">
-            <button className="btn btn-secondary" onClick={props.onExtractDocuments} disabled={props.disabled || !props.hasDocuments || props.pending}>
-              Timeline aktualisieren
+            <button className="btn btn-secondary" onClick={props.onLoadFromStore} disabled={props.disabled || !props.hasDocuments || props.pending}>
+              Timeline laden
+            </button>
+            <button className="chip" onClick={props.onExtractDocuments} disabled={props.disabled || !props.hasDocuments || props.pending} title="Führt KI-Extraktion für alle Dokumente erneut aus (kostet Tokens)">
+              Neu extrahieren
             </button>
             {props.timelineItems.length > 0 ? (
               <button className="chip" onClick={exportTimelineCsv} disabled={props.pending}>

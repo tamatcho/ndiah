@@ -1538,6 +1538,7 @@ export default function App() {
                         onInputChange={setTimelineInput}
                         onExtract={() => void extractTimeline()}
                         onExtractDocuments={() => void rebuildTimeline()}
+                        onLoadFromStore={() => void loadTimelineFromStore()}
                         onRetry={() => void retryTimeline()}
                         onSearchChange={setTimelineSearch}
                         onCategoryChange={setTimelineCategory}
